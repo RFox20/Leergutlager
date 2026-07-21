@@ -243,8 +243,14 @@ function bestPrice(a){
 function nowIso(){ return new Date().toISOString(); }
 function fmtTime(iso){ try{ const d=new Date(iso); return d.toLocaleDateString('de-AT',{day:'2-digit',month:'2-digit'})+' '+d.toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'}); }catch(e){return '';} }
 
-/* ---------- storage (localStorage) ---------- */
-const LS_PREFIX = 'leergut_';
+/* ---------- storage (Supabase) ---------- */
+const SB_URL = 'https://kmirdmwgtxqzzkhyyrd.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImttaXJkbXdndHhxenpraHl5eXJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1ODUyNTksImV4cCI6MjEwMDE2MTI1OX0.Dp1hTA3dUNNObsvmSKwhfBqysJQdR5W1_uPSyvjqszw';
+const SB_HEADERS = {
+  'apikey': SB_KEY,
+  'Authorization': 'Bearer ' + SB_KEY,
+  'Content-Type': 'application/json'
+};
 const CACHE_FIELDS = ['_norm','_compact','_normMarke','_normOrt','_normBez1','_normBez2','_sortKey'];
 
 function stripCacheFromArticles(articles){
@@ -257,8 +263,13 @@ function stripCacheFromArticles(articles){
 
 async function storageGet(key){
   try{
-    const val = localStorage.getItem(LS_PREFIX + key);
-    return val ? JSON.parse(val) : null;
+    const res = await fetch(
+      `${SB_URL}/rest/v1/kv_store?key=eq.${encodeURIComponent(key)}&select=value`,
+      { headers: SB_HEADERS }
+    );
+    if(!res.ok) return null;
+    const rows = await res.json();
+    return rows.length > 0 ? rows[0].value : null;
   }catch(e){ return null; }
 }
 
@@ -266,10 +277,18 @@ async function storageSet(key, value){
   try{
     const toSave = (key === 'articles' && Array.isArray(value))
       ? stripCacheFromArticles(value) : value;
-    localStorage.setItem(LS_PREFIX + key, JSON.stringify(toSave));
-    return true;
+    const res = await fetch(`${SB_URL}/rest/v1/kv_store`, {
+      method: 'POST',
+      headers: { ...SB_HEADERS, 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify({ key, value: toSave, updated_at: new Date().toISOString() })
+    });
+    if(!res.ok){
+      const txt = await res.text().catch(()=>'');
+      state.supabaseError = `HTTP ${res.status}: ${txt.slice(0,200)}`;
+    }
+    return res.ok;
   }catch(e){
-    state.supabaseError = `Speicherfehler: ${e.message}`;
+    state.supabaseError = `Netzwerkfehler: ${e.message}`;
     return false;
   }
 }
