@@ -295,34 +295,67 @@ async function storageSet(key, value){
 
 async function loadAll(){
   let persistent = true;
+  // CRITICAL: distinguish between "key doesn't exist yet" (first-ever load) vs "network error"
+  // Strategy: try to read. If we get null AND a separate connectivity test passes → first load → save SEED.
+  // If we get null AND connectivity fails → network error → use SEED for display ONLY, do NOT overwrite.
+
+  let networkOk = true;
+  try{
+    // Quick connectivity check: try to read ANY key to test if Supabase responds at all
+    await storageGet('_ping');
+  }catch(e){
+    networkOk = false;
+  }
+
   try{
     const a = await storageGet('articles');
-    if(a) state.articles = a; else throw new Error('empty');
+    if(a){
+      state.articles = a;
+    } else if(networkOk){
+      // Supabase responded but key doesn't exist → genuine first load → save SEED
+      state.articles = SEED_ARTICLES.map(a=>({...a}));
+      storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
+    } else {
+      // Network error → use SEED for display but do NOT save (don't overwrite real data)
+      state.articles = SEED_ARTICLES.map(a=>({...a}));
+      persistent = false;
+      state.supabaseError = 'Keine Verbindung zu Supabase – lokale Seed-Daten werden angezeigt. Bitte Seite neu laden.';
+    }
   }catch(e){
     state.articles = SEED_ARTICLES.map(a=>({...a}));
-    try{ await storageSet('articles', state.articles); }catch(e2){ persistent = false; }
+    persistent = false;
+    state.supabaseError = `Ladefehler: ${e.message}`;
   }
+
   try{
     const a = await storageGet('aliases');
-    if(a) state.aliases = a; else throw new Error('empty');
-  }catch(e){
-    state.aliases = {...ALIAS_SEED};
-    try{ await storageSet('aliases', state.aliases); }catch(e2){ persistent = false; }
-  }
+    if(a) state.aliases = a;
+    else if(networkOk){
+      state.aliases = {...ALIAS_SEED};
+      storageSet('aliases', state.aliases);
+    } else { state.aliases = {...ALIAS_SEED}; }
+  }catch(e){ state.aliases = {...ALIAS_SEED}; }
+
   try{
     const t = await storageGet('transactions');
     state.transactions = t || [];
   }catch(e){ state.transactions = []; }
+
   try{
     const l = await storageGet('locations');
-    if(l) state.locations = l; else throw new Error('empty');
+    if(l) state.locations = l;
+    else if(networkOk){
+      state.locations = Array.from(new Set(SEED_ARTICLES.map(a=>a.ort).filter(Boolean))).sort();
+      storageSet('locations', state.locations);
+    } else {
+      state.locations = Array.from(new Set(SEED_ARTICLES.map(a=>a.ort).filter(Boolean))).sort();
+    }
   }catch(e){
     state.locations = Array.from(new Set(SEED_ARTICLES.map(a=>a.ort).filter(Boolean))).sort();
-    try{ await storageSet('locations', state.locations); }catch(e2){ persistent = false; }
   }
+
   state.persistent = persistent;
   reindexArticles();
-  // Daily backup reminder: check if last reminder was shown today
   try{
     const lastReminder = await storageGet('lastBackupReminder');
     const today = new Date().toISOString().slice(0,10);
