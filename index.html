@@ -1507,7 +1507,7 @@ document.addEventListener('click', async (e)=>{
         changes.push({id, before:entry.qty, after:newTotal, boxesBefore:entry.boxes, boxesAfter:newBoxes});
         entry.qty = newTotal;
         entry.boxes = newBoxes;
-        a.qty = Number(a.qty||0) + delta;
+        a.qty = Math.max(0, Number(a.qty||0) + delta);
       }
     });
     state.articles.forEach(a=>{ if(a.pallets) a.pallets = a.pallets.filter(p=>Number(p.qty)>0); });
@@ -1649,21 +1649,27 @@ document.addEventListener('change', (e)=>{
           const qty = Number(cols[qtyIdx]);
           if(!isNaN(qty)) a.qty = qty;
           if(ortIdx>-1 && cols[ortIdx]) a.ort = cols[ortIdx];
-          if(palIdx>-1 && cols[palIdx]){
+          if(palIdx>-1){
             const palStr = cols[palIdx];
-            const newPallets = [];
-            palStr.split('|').forEach(part=>{
-              const pm = part.trim().match(/Pal\.(.+?)x(\d+)Stk/);
-              if(pm) newPallets.push({nr:pm[1].trim(), qty:Number(pm[2]), boxes:[Number(pm[2])]});
-            });
-            if(newPallets.length){
-              const existingByNr = {};
-              (a.pallets||[]).forEach(p=>existingByNr[p.nr]=p);
-              a.pallets = newPallets.map(np=>{
-                const ep = existingByNr[np.nr];
-                if(ep && ep.boxes && ep.boxes.length>1 && ep.qty===np.qty) return ep;
-                return np;
+            if(palStr){
+              const newPallets = [];
+              palStr.split('|').forEach(part=>{
+                const pm = part.trim().match(/Pal\.(.+?)x(\d+)Stk/);
+                if(pm) newPallets.push({nr:pm[1].trim(), qty:Number(pm[2]), boxes:[Number(pm[2])]});
               });
+              if(newPallets.length){
+                const existingByNr = {};
+                (a.pallets||[]).forEach(p=>existingByNr[p.nr]=p);
+                a.pallets = newPallets.map(np=>{
+                  const ep = existingByNr[np.nr];
+                  if(ep && ep.boxes && ep.boxes.length>1 && ep.qty===np.qty) return ep;
+                  return np;
+                });
+              } else {
+                a.pallets = []; // paletten-string vorhanden aber nicht parsierbar → leeren
+              }
+            } else {
+              a.pallets = []; // leere paletten-spalte → paletten leeren
             }
           }
           updated++;
