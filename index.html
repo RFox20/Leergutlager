@@ -466,7 +466,9 @@ function render(){
         <div class="brand"><span class="dot"></span>Leergut-Lager</div>
         <div style="display:flex;align-items:center;gap:6px;">
           <input type="file" id="csvImportInput" accept=".csv" style="display:none;">
+          <input type="file" id="csvAusgangInput" accept=".csv" style="display:none;">
           <button data-action="trigger-import-csv" style="background:var(--accent);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📂 Import</button>
+          <button data-action="trigger-ausgang-csv" style="background:#e07b00;color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📤 Ausgang</button>
           <button data-action="quick-export" style="background:var(--green);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">💾 Export</button>
           <button class="gear" data-action="open-settings" aria-label="Einstellungen">⚙</button>
         </div>
@@ -1245,6 +1247,11 @@ document.addEventListener('click', async (e)=>{
     if(inp) inp.click();
     return;
   }
+  if(action==='trigger-ausgang-csv'){
+    const inp = document.getElementById('csvAusgangInput');
+    if(inp) inp.click();
+    return;
+  }
   if(action==='open-settings'){ state.modal='settings'; render(); return; }
   if(action==='open-numpad'){
     const kind = t.dataset.kind, key = t.dataset.key, boxIdx = t.dataset.boxIdx!=null && t.dataset.boxIdx!=='' ? Number(t.dataset.boxIdx) : null;
@@ -1791,6 +1798,53 @@ document.addEventListener('change', (e)=>{
     };
     reader.readAsText(file, 'utf-8');
     // Reset so same file can be selected again
+    e.target.value = '';
+  }
+
+  // ---- Sammelausgang CSV ----
+  if(e.target.id === 'csvAusgangInput'){
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = async (ev)=>{
+      try{
+        const text = ev.target.result;
+        const lines = text.split('\n');
+        const sep = lines[0].includes(';') ? ';' : ',';
+        const headers = lines[0].replace(/^\uFEFF/,'').split(sep).map(h=>h.trim().replace(/^"|"$/g,''));
+        const artIdx = headers.findIndex(h=>h==='Artikel');
+        const qtyIdx = headers.findIndex(h=>h==='Lagerstand'||h==='Verkaufsmenge');
+        if(artIdx===-1||qtyIdx===-1){ showToast('CSV-Format nicht erkannt (Spalten: Artikel + Lagerstand/Verkaufsmenge)'); return; }
+        let ausgebucht = 0;
+        let gesamtMenge = 0;
+        const log = [];
+        for(let i=1;i<lines.length;i++){
+          const cols = lines[i].split(sep).map(c=>c.trim().replace(/^"|"$/g,''));
+          const id = cols[artIdx];
+          if(!id) continue;
+          const verkaufsMenge = Number(cols[qtyIdx]);
+          if(!verkaufsMenge || verkaufsMenge <= 0) continue;
+          const a = findByExactId(id);
+          if(!a) continue;
+          const vorher = a.qty;
+          a.qty = Math.max(0, a.qty - verkaufsMenge);
+          const tatsaechlich = vorher - a.qty;
+          if(tatsaechlich > 0){
+            logTransaction({type:'sammelausgang', id:a.id, delta:-tatsaechlich, ort:'', customer:'Sammelausgang', price:null});
+            ausgebucht++;
+            gesamtMenge += tatsaechlich;
+            log.push({id:a.id, verkauft:tatsaechlich, restbestand:a.qty});
+          }
+        }
+        if(ausgebucht === 0){ showToast('Keine Artikel mit Verkaufsmenge > 0 gefunden'); return; }
+        saveArticles();
+        render();
+        showToast(`📤 ${ausgebucht} Artikel ausgebucht, ${gesamtMenge} Stk. gesamt`);
+      }catch(err){
+        showToast('Fehler beim Ausgang: '+err.message);
+      }
+    };
+    reader.readAsText(file, 'utf-8');
     e.target.value = '';
   }
 });
