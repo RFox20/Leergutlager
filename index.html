@@ -968,10 +968,8 @@ function renderModal(){
         </div>
       </div>`;
   }
+  if(state.modal==='newlocation'){
     return `
-      <div class="modal-backdrop" data-action="close-modal">
-        <div class="modal" data-stop="1">
-          <div class="modal-title">Neuer Lagerort<button class="modal-close" data-action="close-modal">✕</button></div>
           <div class="field"><input type="text" id="newLocationInput" placeholder="z. B. Regal2"></div>
           <button class="btn-primary" data-action="confirm-new-location" style="width:100%;">Anlegen</button>
         </div>
