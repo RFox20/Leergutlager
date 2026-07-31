@@ -197,6 +197,7 @@ let state = {
   sucheOnlyStock: true,
   renamingLocation: null,
   copyTemplate: null,
+  umlagerung: null,
   verkaufQuery: '',
   verkaufSelected: null,
   verkaufMode: null, // 'voll' | 'teil'
@@ -243,7 +244,12 @@ function bestPrice(a){
   if(bestKey==null) return null;
   return { key:bestKey, label:PRICE_LABELS[bestKey], value:bestVal };
 }
-function nowIso(){ return new Date().toISOString(); }
+function verfuegbar(a){ return Math.max(0, (a.qty||0) - (a.reserved||0)); }
+function toggleNewPalInput(){
+  const sel = document.getElementById('umlagerZiel');
+  const f = document.getElementById('newPalField');
+  if(f) f.style.display = sel && sel.value==='__neu__' ? 'block' : 'none';
+}
 function fmtTime(iso){ try{ const d=new Date(iso); return d.toLocaleDateString('de-AT',{day:'2-digit',month:'2-digit'})+' '+d.toLocaleTimeString('de-AT',{hour:'2-digit',minute:'2-digit'}); }catch(e){return '';} }
 
 /* ---------- storage (Supabase) ---------- */
@@ -508,12 +514,14 @@ function renderScreen(){
 }
 
 function renderArticleRow(a, {action='select', label='Auswählen'}={}){
+  const res = a.reserved||0;
+  const resTag = res > 0 ? `<span style="background:#fff3cd;color:#856404;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;margin-left:6px;">🔒 ${res} res.</span>` : '';
   return `
     <div class="article-row ${artClass(a.art)} ${a.qty>0?'':'is-empty'}">
       <div class="tag-stripe"></div>
       <div class="article-row-body">
         <div>
-          <div class="article-id">${escapeHtml(a.id)}</div>
+          <div class="article-id">${escapeHtml(a.id)}${resTag}</div>
           <div class="article-sub">${escapeHtml(a.marke||'–')} · ${escapeHtml(a.ort||'kein Ort')}${a.bez1?` · <i>${escapeHtml(a.bez1)}</i>`:''}</div>
         </div>
         <button class="row-btn" data-action="${action}" data-id="${escapeHtml(a.id)}">${label}</button>
@@ -844,6 +852,7 @@ function renderInventurPalette(nr){
             ${draftBoxes.length>1?`<button data-action="inventur-remove-box" data-id="${escapeHtml(a.id)}" data-box-idx="${i}" style="color:var(--danger);font-size:18px;padding:4px 8px;">✕</button>`:''}
           </div>`).join('')}
         <button class="small-link" data-action="inventur-add-box" data-id="${escapeHtml(a.id)}" style="margin-top:4px;">+ Karton hinzufügen</button>
+        <button class="small-link" data-action="open-umlagern" data-id="${escapeHtml(a.id)}" data-nr="${escapeHtml(nr)}" style="margin-top:4px;color:var(--amber);">📦 Umlagern auf andere Palette</button>
       </div>`;
   });
   html += `<div class="sticky-cta" data-action="confirm-inventur-palette" data-nr="${escapeHtml(nr)}">${anyChanged ? 'Änderungen speichern' : 'Zählung speichern'}</div>`;
@@ -924,7 +933,38 @@ function renderModal(){
         </div>
       </div>`;
   }
-  if(state.modal==='newlocation'){
+  if(state.modal==='umlagern' && state.umlagerung){
+    const {articleId, sourcePalNr} = state.umlagerung;
+    const a = state.articles.find(x=>x.id===articleId);
+    if(!a) return '';
+    const sourcePal = (a.pallets||[]).find(p=>norm(p.nr)===norm(sourcePalNr));
+    const sourceQty = sourcePal ? sourcePal.qty : 0;
+    const otherPals = (a.pallets||[]).filter(p=>norm(p.nr)!==norm(sourcePalNr) && p.qty>0);
+    return `
+      <div class="modal-backdrop" data-action="close-modal">
+        <div class="modal" data-stop="1">
+          <div class="modal-title">📦 Umlagern<button class="modal-close" data-action="close-modal">✕</button></div>
+          <div class="modal-item"><span>Artikel</span><b>${escapeHtml(articleId)}</b></div>
+          <div class="modal-item"><span>Von Palette</span><b>${escapeHtml(sourcePalNr)} (${sourceQty} Stk.)</b></div>
+          <div class="field" style="margin-top:12px;">
+            <label>Menge umlagern (max. ${sourceQty})</label>
+            <input type="text" inputmode="numeric" pattern="[0-9]*" id="umlagerMenge" value="${sourceQty}" style="font-size:20px;font-weight:700;text-align:center;">
+          </div>
+          <div class="field">
+            <label>Auf Palette</label>
+            <select id="umlagerZiel" onchange="toggleNewPalInput()">
+              ${otherPals.map(p=>`<option value="${escapeHtml(p.nr)}">Pal. ${escapeHtml(p.nr)} (${p.qty} Stk. vorhanden)</option>`).join('')}
+              <option value="__neu__">➕ Neue Palette anlegen…</option>
+            </select>
+          </div>
+          <div class="field" id="newPalField" style="display:${otherPals.length?'none':'block'}">
+            <label>Neue Palette Nr.</label>
+            <input type="text" id="umlagerNeuNr" placeholder="z.B. 5 oder S1">
+          </div>
+          <button class="btn-primary" data-action="confirm-umlagern" style="width:100%;margin-top:4px;">Umlagern</button>
+        </div>
+      </div>`;
+  }
     return `
       <div class="modal-backdrop" data-action="close-modal">
         <div class="modal" data-stop="1">
@@ -1007,6 +1047,10 @@ function renderModal(){
           </div>
           <div class="field"><label>Lagerstand</label>
             <input type="text" inputmode="numeric" pattern="[0-9]*" id="editQty" value="${d.qty}">
+          </div>
+          <div class="field"><label>🔒 Reserviert (nicht für Kunden verfügbar)</label>
+            <input type="text" inputmode="numeric" pattern="[0-9]*" id="editReserved" value="${d.reserved||0}" placeholder="0">
+            <div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">Verfügbar für Kunden: ${verfuegbar(d)} Stk.</div>
           </div>
 
           <div class="section-title" style="margin-top:6px;">Paletten</div>
@@ -1190,6 +1234,7 @@ function _saveEditFieldsToDraft(){
   if(g('editBez2')!==null) d.bez2 = g('editBez2');
   if(g('editOrt')!==null) d.ort = g('editOrt');
   if(g('editQty')!==null) d.qty = Number(g('editQty')||0);
+  if(g('editReserved')!==null) d.reserved = Math.min(Number(g('editReserved')||0), d.qty);
   // Pallets
   (d.pallets||[]).forEach((p,pi)=>{
     const nrEl = document.getElementById('editPalNr_'+pi);
@@ -1527,7 +1572,59 @@ document.addEventListener('click', async (e)=>{
 
   if(action==='set-inventur-ort'){ state.inventurOrt=t.dataset.ort; state.inventurPalette=null; state.inventurDraft={}; render(); return; }
   if(action==='set-inventur-palette'){ state.inventurPalette=t.dataset.nr; state.inventurOrt=null; state.inventurPaletteDraft={}; render(); return; }
-  if(action==='new-location'){ state.modal='newlocation'; render(); return; }
+  if(action==='open-umlagern'){
+    state.umlagerung = {articleId: t.dataset.id, sourcePalNr: t.dataset.nr};
+    state.modal = 'umlagern';
+    render();
+    return;
+  }
+  if(action==='confirm-umlagern'){
+    const {articleId, sourcePalNr} = state.umlagerung||{};
+    const a = state.articles.find(x=>x.id===articleId);
+    if(!a){ state.modal=null; render(); return; }
+    const menge = Number(document.getElementById('umlagerMenge').value||0);
+    const zielSel = document.getElementById('umlagerZiel');
+    let zielNr = zielSel ? zielSel.value : '__neu__';
+    if(zielNr==='__neu__'){
+      zielNr = (document.getElementById('umlagerNeuNr').value||'').trim();
+    }
+    if(!menge||menge<=0){ showToast('Menge muss > 0 sein'); return; }
+    if(!zielNr){ showToast('Bitte Ziel-Palette angeben'); return; }
+    if(norm(zielNr)===norm(sourcePalNr)){ showToast('Quelle und Ziel sind gleich'); return; }
+
+    // Subtract from source
+    const srcPal = (a.pallets||[]).find(p=>norm(p.nr)===norm(sourcePalNr));
+    if(!srcPal){ showToast('Quell-Palette nicht gefunden'); return; }
+    const actualMenge = Math.min(menge, srcPal.qty);
+    srcPal.qty -= actualMenge;
+    srcPal.boxes = srcPal.boxes ? srcPal.boxes.map(b=>b).filter((_,i)=>i<srcPal.boxes.length) : [];
+    // Adjust boxes proportionally: remove from last box first
+    let remaining = actualMenge;
+    for(let i=(srcPal.boxes.length||1)-1; i>=0 && remaining>0; i--){
+      const take = Math.min(srcPal.boxes[i]||0, remaining);
+      srcPal.boxes[i] = (srcPal.boxes[i]||0) - take;
+      remaining -= take;
+    }
+    srcPal.boxes = srcPal.boxes.filter(b=>b>0);
+    if(srcPal.qty<=0) a.pallets = a.pallets.filter(p=>norm(p.nr)!==norm(sourcePalNr));
+
+    // Add to destination
+    let dstPal = (a.pallets||[]).find(p=>norm(p.nr)===norm(zielNr));
+    if(!dstPal){
+      dstPal = {nr:zielNr, qty:0, boxes:[]};
+      a.pallets = a.pallets||[];
+      a.pallets.push(dstPal);
+    }
+    dstPal.qty += actualMenge;
+    dstPal.boxes = [...(dstPal.boxes||[]), actualMenge];
+
+    saveArticles();
+    state.modal=null; state.umlagerung=null;
+    state.inventurPaletteDraft={};
+    render();
+    showToast(`✓ ${actualMenge} Stk. von Pal. ${sourcePalNr} → Pal. ${zielNr} umgelagert`);
+    return;
+  }
   if(action==='confirm-new-location'){
     const val = document.getElementById('newLocationInput').value.trim();
     if(val && !state.locations.includes(val)){
