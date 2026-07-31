@@ -272,10 +272,13 @@ function stripCacheFromArticles(articles){
 
 async function storageGet(key){
   try{
+    const controller = new AbortController();
+    const timer = setTimeout(()=>controller.abort(), 8000);
     const res = await fetch(
       `${SB_URL}/rest/v1/kv_store?key=eq.${encodeURIComponent(key)}&select=value`,
-      { headers: SB_HEADERS }
+      { headers: SB_HEADERS, signal: controller.signal }
     );
+    clearTimeout(timer);
     if(!res.ok) return null;
     const rows = await res.json();
     return rows.length > 0 ? rows[0].value : null;
