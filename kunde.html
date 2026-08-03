@@ -69,7 +69,10 @@
 
 <div class="topbar">
   <div class="brand"><div class="dot"></div><div><div>Leergut-Lager</div><div class="subtitle">Verfügbare Artikel</div></div></div>
-  <button class="cart-btn" onclick="openCart()">🛒 Anfragekorb <span class="cart-badge" id="cartBadge">0</span></button>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <button class="cart-btn" style="background:var(--green);" onclick="downloadCsv()">⬇ CSV</button>
+    <button class="cart-btn" onclick="openCart()">🛒 Anfragekorb <span class="cart-badge" id="cartBadge">0</span></button>
+  </div>
 </div>
 
 <div class="content">
@@ -277,6 +280,24 @@ function showToast(msg){
   t.className='toast'; t.textContent=msg;
   document.body.appendChild(t);
   setTimeout(()=>t.remove(),2500);
+}
+
+function downloadCsv(){
+  const headers = ['Artikel','Marke','Art','Bezeichnung','Verfügbar'];
+  const lines = [headers.join(';')];
+  allArticles.forEach(a=>{
+    const vals = [a.id, a.marke||'', a.art||'', a.bez1||'', verfuegbar(a)].map(v=>{
+      let s = String(v==null?'':v);
+      if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"';
+      return s;
+    });
+    lines.push(vals.join(';'));
+  });
+  const blob = new Blob(['\uFEFF'+lines.join('\n')], {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download='Leergut_Lagerstand_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click(); URL.revokeObjectURL(url);
 }
 
 loadArticles();
