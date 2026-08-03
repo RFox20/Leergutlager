@@ -69,7 +69,7 @@
 
 <div class="topbar">
   <div class="brand"><div class="dot"></div><div><div>Leergut-Lager</div><div class="subtitle">Verfügbare Artikel</div></div></div>
-  <button class="cart-btn" onclick="openCart()">🛒 Warenkorb <span class="cart-badge" id="cartBadge">0</span></button>
+  <button class="cart-btn" onclick="openCart()">🛒 Anfragekorb <span class="cart-badge" id="cartBadge">0</span></button>
 </div>
 
 <div class="content">
@@ -93,7 +93,7 @@
 <!-- Cart Modal -->
 <div class="modal-backdrop" id="cartModal" style="display:none;" onclick="closeCartOnBackdrop(event)">
   <div class="modal">
-    <div class="modal-title">Warenkorb <button class="modal-close" onclick="closeCart()">✕</button></div>
+    <div class="modal-title">Anfragekorb <button class="modal-close" onclick="closeCart()">✕</button></div>
     <div id="cartContent"></div>
     <div id="cartForm" style="display:none;margin-top:16px;">
       <div class="field"><label>Ihr Name *</label><input type="text" id="orderName" placeholder="Max Mustermann"></div>
@@ -172,7 +172,7 @@ function filterArticles(){
         </div>
         <div style="display:flex;align-items:center;gap:10px;">
           <div class="article-qty">${verfuegbar(a)} Stk.</div>
-          <button class="add-btn" onclick="addToCart('${esc(a.id)}')">+ Warenkorb</button>
+          <button class="add-btn" onclick="addToCart('${esc(a.id)}')">+ Anfragekorb</button>
         </div>
       </div>
     </div>`).join('');
@@ -191,7 +191,7 @@ function addToCart(id){
     cart[id] = {article:a, qty:1};
   }
   updateCartBadge();
-  showToast('✓ '+id+' zum Warenkorb hinzugefügt');
+  showToast('✓ '+id+' zum Anfragekorb hinzugefügt');
 }
 
 function updateCartBadge(){
@@ -211,7 +211,7 @@ function renderCart(){
   const content = document.getElementById('cartContent');
   const form = document.getElementById('cartForm');
   if(!items.length){
-    content.innerHTML='<div class="cart-empty">Warenkorb ist leer.<br>Füge Artikel über den "+ Warenkorb"-Button hinzu.</div>';
+    content.innerHTML='<div class="cart-empty">Anfragekorb ist leer.<br>Füge Artikel über den "+ Anfragekorb"-Button hinzu.</div>';
     form.style.display='none';
     return;
   }
@@ -253,7 +253,7 @@ function sendOrder(){
   const note = document.getElementById('orderNote').value.trim();
   if(!name||!email){ showToast('Bitte Name und E-Mail ausfüllen'); return; }
   const items = Object.values(cart);
-  if(!items.length){ showToast('Warenkorb ist leer'); return; }
+  if(!items.length){ showToast('Anfragekorb ist leer'); return; }
 
   const lines = items.map(({article:a,qty})=>`${a.id} – ${qty} Stk. (verfügbar: ${verfuegbar(a)} Stk.)`);
   const body = [
