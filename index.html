@@ -271,18 +271,21 @@ function stripCacheFromArticles(articles){
 }
 
 async function storageGet(key){
+  const controller = new AbortController();
+  const timer = setTimeout(()=>controller.abort(), 8000);
   try{
-    const controller = new AbortController();
-    const timer = setTimeout(()=>controller.abort(), 8000);
     const res = await fetch(
       `${SB_URL}/rest/v1/kv_store?key=eq.${encodeURIComponent(key)}&select=value`,
       { headers: SB_HEADERS, signal: controller.signal }
     );
     clearTimeout(timer);
-    if(!res.ok) return null;
+    if(!res.ok) throw new Error('HTTP '+res.status);
     const rows = await res.json();
-    return rows.length > 0 ? rows[0].value : null;
-  }catch(e){ return null; }
+    return rows.length > 0 ? rows[0].value : null; // null = key existiert nicht (kein Fehler)
+  }catch(e){
+    clearTimeout(timer);
+    throw e; // Netzwerkfehler weitergeben – NICHT schlucken!
+  }
 }
 
 async function storageSet(key, value){
@@ -307,74 +310,60 @@ async function storageSet(key, value){
 
 async function loadAll(){
   let persistent = true;
-  // CRITICAL: distinguish between "key doesn't exist yet" (first-ever load) vs "network error"
-  // Strategy: try to read. If we get null AND a separate connectivity test passes → first load → save SEED.
-  // If we get null AND connectivity fails → network error → use SEED for display ONLY, do NOT overwrite.
 
-  let networkOk = true;
-  try{
-    // Quick connectivity check: try to read ANY key to test if Supabase responds at all
-    await storageGet('_ping');
-  }catch(e){
-    networkOk = false;
-  }
-
+  // articles
   try{
     const a = await storageGet('articles');
     if(a){
-      state.articles = a;
-    } else if(networkOk){
-      // Supabase responded but key doesn't exist → genuine first load → save SEED
+      state.articles = a; // Supabase hat Daten → laden
+    } else {
+      // Supabase erreichbar aber kein Eintrag → echter Erststart → SEED speichern
       state.articles = SEED_ARTICLES.map(a=>({...a}));
       storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
-    } else {
-      // Network error → use SEED for display but do NOT save (don't overwrite real data)
-      state.articles = SEED_ARTICLES.map(a=>({...a}));
-      persistent = false;
-      state.supabaseError = 'Keine Verbindung zu Supabase – lokale Seed-Daten werden angezeigt. Bitte Seite neu laden.';
     }
   }catch(e){
+    // Netzwerkfehler / Timeout → SEED nur anzeigen, NIEMALS in Supabase schreiben!
     state.articles = SEED_ARTICLES.map(a=>({...a}));
     persistent = false;
-    state.supabaseError = `Ladefehler: ${e.message}`;
+    state.supabaseError = `Verbindungsfehler beim Laden: ${e.message}. Bitte Seite neu laden.`;
   }
 
+  // aliases
   try{
     const a = await storageGet('aliases');
-    if(a) state.aliases = a;
-    else if(networkOk){
-      state.aliases = {...ALIAS_SEED};
-      storageSet('aliases', state.aliases);
-    } else { state.aliases = {...ALIAS_SEED}; }
+    state.aliases = a || {...ALIAS_SEED};
+    if(!a) storageSet('aliases', state.aliases).catch(()=>{});
   }catch(e){ state.aliases = {...ALIAS_SEED}; }
 
+  // transactions
   try{
     const t = await storageGet('transactions');
     state.transactions = t || [];
   }catch(e){ state.transactions = []; }
 
+  // locations
   try{
     const l = await storageGet('locations');
-    if(l) state.locations = l;
-    else if(networkOk){
-      state.locations = Array.from(new Set(SEED_ARTICLES.map(a=>a.ort).filter(Boolean))).sort();
-      storageSet('locations', state.locations);
+    if(l){
+      state.locations = l;
     } else {
-      state.locations = Array.from(new Set(SEED_ARTICLES.map(a=>a.ort).filter(Boolean))).sort();
+      state.locations = Array.from(new Set(state.articles.map(a=>a.ort).filter(Boolean))).sort();
+      storageSet('locations', state.locations).catch(()=>{});
     }
   }catch(e){
-    state.locations = Array.from(new Set(SEED_ARTICLES.map(a=>a.ort).filter(Boolean))).sort();
+    state.locations = Array.from(new Set(state.articles.map(a=>a.ort).filter(Boolean))).sort();
   }
 
   state.persistent = persistent;
   reindexArticles();
+
+  // daily backup reminder
   try{
     const lastReminder = await storageGet('lastBackupReminder');
     const today = new Date().toISOString().slice(0,10);
-    if(!lastReminder || lastReminder !== today){
-      state.showDailyBackupBanner = true;
-    }
+    if(!lastReminder || lastReminder !== today) state.showDailyBackupBanner = true;
   }catch(e){ state.showDailyBackupBanner = true; }
+
   state.loaded = true;
 }
 function reindexArticles(){
@@ -1912,10 +1901,10 @@ document.addEventListener('change', (e)=>{
         const headers = lines[0].replace(/^\uFEFF/,'').split(sep).map(h=>h.trim().replace(/^"|"$/g,''));
         const artIdx = headers.findIndex(h=>h==='Artikel');
         const qtyIdx = headers.findIndex(h=>h==='Lagerstand'||h==='Verkaufsmenge');
+        const palIdx = headers.findIndex(h=>h==='Paletten');
         if(artIdx===-1||qtyIdx===-1){ showToast('CSV-Format nicht erkannt (Spalten: Artikel + Lagerstand/Verkaufsmenge)'); return; }
         let ausgebucht = 0;
         let gesamtMenge = 0;
-        const log = [];
         for(let i=1;i<lines.length;i++){
           const cols = lines[i].split(sep).map(c=>c.trim().replace(/^"|"$/g,''));
           const id = cols[artIdx];
@@ -1925,13 +1914,60 @@ document.addEventListener('change', (e)=>{
           const a = findByExactId(id);
           if(!a) continue;
           const vorher = a.qty;
-          a.qty = Math.max(0, a.qty - verkaufsMenge);
+          let restAbzug = Math.min(verkaufsMenge, a.qty);
+
+          // 1) Wenn Paletten-Spalte vorhanden: gezielte Palette(n) ausbuchen
+          if(palIdx > -1 && cols[palIdx]){
+            const palStr = cols[palIdx];
+            palStr.split('|').forEach(part=>{
+              const pm = part.trim().match(/Pal\.(.+?)x(\d+)Stk/);
+              if(!pm) return;
+              const nr = pm[1].trim();
+              const menge = Number(pm[2]);
+              const pal = (a.pallets||[]).find(p=>norm(p.nr)===norm(nr));
+              if(!pal) return;
+              const nehmen = Math.min(menge, pal.qty);
+              pal.qty -= nehmen;
+              // Kartons von hinten abziehen
+              let rest = nehmen;
+              for(let bi=(pal.boxes||[]).length-1; bi>=0 && rest>0; bi--){
+                const take = Math.min(pal.boxes[bi]||0, rest);
+                pal.boxes[bi] -= take;
+                rest -= take;
+              }
+              pal.boxes = (pal.boxes||[]).filter(b=>b>0);
+            });
+            // Leere Paletten entfernen
+            a.pallets = (a.pallets||[]).filter(p=>p.qty>0);
+          } else {
+            // 2) Kein Paletten-Info: erst unassigned abziehen, dann von Paletten (letzte zuerst)
+            let rest = restAbzug;
+            const unassigned = unassignedQty(a);
+            rest = Math.max(0, rest - unassigned);
+            if(rest > 0 && a.pallets && a.pallets.length){
+              for(let pi=a.pallets.length-1; pi>=0 && rest>0; pi--){
+                const pal = a.pallets[pi];
+                const nehmen = Math.min(pal.qty, rest);
+                pal.qty -= nehmen;
+                rest -= nehmen;
+                let boxRest = nehmen;
+                for(let bi=(pal.boxes||[]).length-1; bi>=0 && boxRest>0; bi--){
+                  const take = Math.min(pal.boxes[bi]||0, boxRest);
+                  pal.boxes[bi] -= take;
+                  boxRest -= take;
+                }
+                pal.boxes = (pal.boxes||[]).filter(b=>b>0);
+              }
+              a.pallets = a.pallets.filter(p=>p.qty>0);
+            }
+          }
+
+          a.qty = Math.max(0, a.qty - restAbzug);
           const tatsaechlich = vorher - a.qty;
           if(tatsaechlich > 0){
             logTransaction({type:'sammelausgang', id:a.id, delta:-tatsaechlich, ort:'', customer:'Sammelausgang', price:null});
             ausgebucht++;
             gesamtMenge += tatsaechlich;
-            log.push({id:a.id, verkauft:tatsaechlich, restbestand:a.qty});
           }
         }
         if(ausgebucht === 0){ showToast('Keine Artikel mit Verkaufsmenge > 0 gefunden'); return; }
