@@ -433,14 +433,37 @@ function lsLoad(){
 }
 
 async function saveArticles(){
-  const ts = lsSave(state.articles); // sofort lokal speichern, niemals verlieren
-  // Supabase async im Hintergrund – mit Timestamp
-  const stripped = stripCacheFromArticles(state.articles);
-  storageSet('articles', {data: stripped, ts})
-    .then(ok=>{ if(!ok) state.persistent=false; })
-    .catch(()=>{ state.persistent=false; });
+  const ts = lsSave(state.articles); // sofort lokal speichern – immer erfolgreich
   state.pendingBackupReminder = true;
   checkAutoBackup();
+  // Supabase speichern und Ergebnis anzeigen
+  const stripped = stripCacheFromArticles(state.articles);
+  try{
+    const ok = await storageSet('articles', {data: stripped, ts});
+    if(ok){
+      showSaveConfirm(true);
+    } else {
+      showSaveConfirm(false);
+      state.persistent = false;
+    }
+  }catch(e){
+    showSaveConfirm(false);
+    state.persistent = false;
+  }
+}
+
+function showSaveConfirm(success){
+  // Bestehende Bestätigung entfernen
+  document.querySelectorAll('.save-confirm').forEach(el=>el.remove());
+  const el = document.createElement('div');
+  el.className = 'save-confirm';
+  el.style.cssText = `position:fixed;bottom:70px;right:16px;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.2);transition:opacity .4s;${success ? 'background:#16A34A;color:#fff;' : 'background:#DC2626;color:#fff;'}`;
+  el.textContent = success ? '✅ Gespeichert' : '❌ Speichern fehlgeschlagen – bitte erneut buchen!';
+  document.body.appendChild(el);
+  if(success){
+    setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),400); }, 2000);
+  }
+  // Bei Fehler: bleibt sichtbar bis nächste erfolgreiche Speicherung
 }
 async function dismissDailyBackupBanner(){
   state.showDailyBackupBanner = false;
