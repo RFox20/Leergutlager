@@ -315,17 +315,33 @@ async function loadAll(){
   try{
     const a = await storageGet('articles');
     if(a){
-      state.articles = a; // Supabase hat Daten → laden
+      state.articles = a;
+      lsSave(a); // lokalen Cache aktualisieren
     } else {
       // Supabase erreichbar aber kein Eintrag → echter Erststart → SEED speichern
-      state.articles = SEED_ARTICLES.map(a=>({...a}));
-      storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
+      const cached = lsLoad();
+      if(cached && cached.length > 0){
+        // localStorage hat Daten (z.B. nach Tab-Schließen ohne Supabase) → hochladen
+        state.articles = cached;
+        storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
+      } else {
+        state.articles = SEED_ARTICLES.map(a=>({...a}));
+        storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
+      }
     }
   }catch(e){
-    // Netzwerkfehler / Timeout → SEED nur anzeigen, NIEMALS in Supabase schreiben!
-    state.articles = SEED_ARTICLES.map(a=>({...a}));
+    // Supabase nicht erreichbar → localStorage statt SEED verwenden
+    const cached = lsLoad();
+    if(cached && cached.length > 0){
+      state.articles = cached;
+      const meta = lsMeta();
+      state.supabaseError = `Supabase nicht erreichbar – lokaler Cache vom ${meta ? new Date(meta.ts).toLocaleString('de-AT') : 'unbekannt'} (${cached.filter(a=>a.qty>0).length} Artikel mit Bestand). Bitte Seite neu laden wenn Verbindung steht.`;
+    } else {
+      state.articles = SEED_ARTICLES.map(a=>({...a}));
+      persistent = false;
+      state.supabaseError = `Verbindungsfehler: ${e.message}. Kein lokaler Cache vorhanden – Bitte Backup importieren.`;
+    }
     persistent = false;
-    state.supabaseError = `Verbindungsfehler beim Laden: ${e.message}. Bitte Seite neu laden.`;
   }
 
   // aliases
@@ -365,6 +381,8 @@ async function loadAll(){
   }catch(e){ state.showDailyBackupBanner = true; }
 
   state.loaded = true;
+  // Auto-Backup einmal täglich beim ersten Laden
+  setTimeout(()=>checkAutoBackup(), 3000);
 }
 function reindexArticles(){
   state.articles.forEach(a=>{
@@ -378,12 +396,39 @@ function reindexArticles(){
   });
 }
 
+const LS_KEY = 'leergut_articles_cache';
+const LS_META = 'leergut_cache_meta';
+
+function lsSave(articles){
+  try{
+    const stripped = stripCacheFromArticles(articles);
+    localStorage.setItem(LS_KEY, JSON.stringify(stripped));
+    localStorage.setItem(LS_META, JSON.stringify({ts: new Date().toISOString(), count: stripped.length}));
+  }catch(e){} // localStorage voll o.ä. – ignorieren
+}
+
+function lsLoad(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+
+function lsMeta(){
+  try{
+    const raw = localStorage.getItem(LS_META);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+
 async function saveArticles(){
   // Fire-and-forget: update UI immediately, save to storage in background
+  lsSave(state.articles); // sofort lokal cachen
   storageSet('articles', state.articles)
     .then(ok=>{ if(!ok) state.persistent=false; })
     .catch(()=>{ state.persistent=false; });
   state.pendingBackupReminder = true;
+  checkAutoBackup();
 }
 async function dismissDailyBackupBanner(){
   state.showDailyBackupBanner = false;
@@ -392,6 +437,20 @@ async function dismissDailyBackupBanner(){
 }
 async function saveAliases(){ storageSet('aliases', state.aliases).catch(()=>{}); }
 async function saveLocations(){ storageSet('locations', state.locations).catch(()=>{}); }
+
+function checkAutoBackup(){
+  try{
+    const today = new Date().toISOString().slice(0,10);
+    const lastAuto = localStorage.getItem('leergut_auto_backup_date');
+    if(lastAuto === today) return; // heute schon gemacht
+    const withStock = state.articles.filter(a=>a.qty>0);
+    if(withStock.length === 0) return;
+    // Automatisches CSV-Backup herunterladen
+    const all = state.articles;
+    downloadCsv(`AutoBackup_${today}.csv`, toCsv(all));
+    localStorage.setItem('leergut_auto_backup_date', today);
+  }catch(e){}
+}
 async function logTransaction(entry){
   state.transactions.push({ ts: nowIso(), ...entry });
   if(state.transactions.length > 400) state.transactions = state.transactions.slice(-400);
