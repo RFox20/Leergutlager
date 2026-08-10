@@ -1586,19 +1586,31 @@ document.addEventListener('click', async (e)=>{
     const srcPal = (a.pallets||[]).find(p=>norm(p.nr)===norm(sourcePalNr));
     if(!srcPal){ showToast('Quell-Palette nicht gefunden'); return; }
     const actualMenge = Math.min(menge, srcPal.qty);
-    srcPal.qty -= actualMenge;
-    srcPal.boxes = srcPal.boxes ? srcPal.boxes.map(b=>b).filter((_,i)=>i<srcPal.boxes.length) : [];
-    // Adjust boxes proportionally: remove from last box first
+
+    // Collect which boxes are being moved (from the end first)
+    const srcBoxes = [...(srcPal.boxes||[srcPal.qty])];
+    const movedBoxes = [];
     let remaining = actualMenge;
-    for(let i=(srcPal.boxes.length||1)-1; i>=0 && remaining>0; i--){
-      const take = Math.min(srcPal.boxes[i]||0, remaining);
-      srcPal.boxes[i] = (srcPal.boxes[i]||0) - take;
+    for(let i=srcBoxes.length-1; i>=0 && remaining>0; i--){
+      const take = Math.min(srcBoxes[i]||0, remaining);
+      if(take === srcBoxes[i]){
+        // Full box → move entirely
+        movedBoxes.unshift(srcBoxes[i]);
+        srcBoxes.splice(i,1);
+      } else {
+        // Partial box → split
+        movedBoxes.unshift(take);
+        srcBoxes[i] -= take;
+      }
       remaining -= take;
     }
-    srcPal.boxes = srcPal.boxes.filter(b=>b>0);
-    if(srcPal.qty<=0) a.pallets = a.pallets.filter(p=>norm(p.nr)!==norm(sourcePalNr));
 
-    // Add to destination
+    // Update source
+    srcPal.qty -= actualMenge;
+    srcPal.boxes = srcBoxes.filter(b=>b>0);
+    if(srcPal.qty <= 0) a.pallets = a.pallets.filter(p=>norm(p.nr)!==norm(sourcePalNr));
+
+    // Add to destination with original box structure
     let dstPal = (a.pallets||[]).find(p=>norm(p.nr)===norm(zielNr));
     if(!dstPal){
       dstPal = {nr:zielNr, qty:0, boxes:[]};
@@ -1606,7 +1618,7 @@ document.addEventListener('click', async (e)=>{
       a.pallets.push(dstPal);
     }
     dstPal.qty += actualMenge;
-    dstPal.boxes = [...(dstPal.boxes||[]), actualMenge];
+    dstPal.boxes = [...(dstPal.boxes||[]), ...movedBoxes];
 
     saveArticles();
     state.modal=null; state.umlagerung=null;
