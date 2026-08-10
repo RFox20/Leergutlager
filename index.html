@@ -311,37 +311,52 @@ async function storageSet(key, value){
 async function loadAll(){
   let persistent = true;
 
-  // articles
+  // SCHRITT 1: localStorage sofort laden (kein Netzwerk, kein Warten)
+  const lsCached = lsLoad();
+  if(lsCached && lsCached.articles && lsCached.articles.length > 0){
+    state.articles = lsCached.articles;
+  } else {
+    state.articles = SEED_ARTICLES.map(a=>({...a}));
+  }
+  const lsTs = lsCached ? (lsCached.ts||0) : 0;
+
+  // SCHRITT 2: Supabase im Hintergrund laden und vergleichen
   try{
-    const a = await storageGet('articles');
-    if(a){
-      state.articles = a;
-      lsSave(a); // lokalen Cache aktualisieren
-    } else {
-      // Supabase erreichbar aber kein Eintrag → echter Erststart → SEED speichern
-      const cached = lsLoad();
-      if(cached && cached.length > 0){
-        // localStorage hat Daten (z.B. nach Tab-Schließen ohne Supabase) → hochladen
-        state.articles = cached;
-        storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
-      } else {
-        state.articles = SEED_ARTICLES.map(a=>({...a}));
-        storageSet('articles', state.articles).then(ok=>{ if(!ok) persistent=false; });
+    const sbRaw = await storageGet('articles');
+    let sbArticles = null, sbTs = 0;
+
+    if(sbRaw){
+      // Neues Format: {data: [...], ts: 123456}
+      // Altes Format: direkt Array
+      if(Array.isArray(sbRaw)){
+        sbArticles = sbRaw; sbTs = 0;
+      } else if(sbRaw.data && Array.isArray(sbRaw.data)){
+        sbArticles = sbRaw.data; sbTs = sbRaw.ts||0;
       }
     }
-  }catch(e){
-    // Supabase nicht erreichbar → localStorage statt SEED verwenden
-    const cached = lsLoad();
-    if(cached && cached.length > 0){
-      state.articles = cached;
-      const meta = lsMeta();
-      state.supabaseError = `Supabase nicht erreichbar – lokaler Cache vom ${meta ? new Date(meta.ts).toLocaleString('de-AT') : 'unbekannt'} (${cached.filter(a=>a.qty>0).length} Artikel mit Bestand). Bitte Seite neu laden wenn Verbindung steht.`;
+
+    if(!sbArticles){
+      // Supabase leer → localStorage hochladen (erster Start oder Supabase zurückgesetzt)
+      if(lsCached && lsCached.articles && lsCached.articles.length > 0){
+        storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: lsTs}).catch(()=>{});
+      } else {
+        // Echter Erststart
+        storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: Date.now()}).catch(()=>{});
+      }
+    } else if(sbTs >= lsTs){
+      // Supabase ist gleich alt oder neuer → Supabase laden
+      state.articles = sbArticles;
+      lsSave(state.articles); // lokalen Cache aktualisieren
     } else {
-      state.articles = SEED_ARTICLES.map(a=>({...a}));
-      persistent = false;
-      state.supabaseError = `Verbindungsfehler: ${e.message}. Kein lokaler Cache vorhanden – Bitte Backup importieren.`;
+      // localStorage ist neuer → Supabase updaten
+      storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: lsTs}).catch(()=>{});
+      state.supabaseError = `Supabase war veraltet – lokale Daten wurden hochgeladen.`;
+      setTimeout(()=>{ state.supabaseError=''; render(); }, 5000);
     }
+  }catch(e){
+    // Supabase nicht erreichbar → localStorage bleibt (bereits geladen oben)
     persistent = false;
+    state.supabaseError = `Supabase nicht erreichbar – lokale Daten aktiv${lsCached ? ` (${lsCached.withStock||0} Artikel mit Bestand)` : ''}. Seite neu laden wenn Verbindung steht.`;
   }
 
   // aliases
@@ -381,7 +396,7 @@ async function loadAll(){
   }catch(e){ state.showDailyBackupBanner = true; }
 
   state.loaded = true;
-  // Auto-Backup einmal täglich beim ersten Laden
+  // Auto-Backup einmal täglich
   setTimeout(()=>checkAutoBackup(), 3000);
 }
 function reindexArticles(){
@@ -402,29 +417,26 @@ const LS_META = 'leergut_cache_meta';
 function lsSave(articles){
   try{
     const stripped = stripCacheFromArticles(articles);
+    const ts = Date.now();
     localStorage.setItem(LS_KEY, JSON.stringify(stripped));
-    localStorage.setItem(LS_META, JSON.stringify({ts: new Date().toISOString(), count: stripped.length}));
-  }catch(e){} // localStorage voll o.ä. – ignorieren
+    localStorage.setItem(LS_META, JSON.stringify({ts, count: stripped.length, withStock: stripped.filter(a=>a.qty>0).length}));
+    return ts;
+  }catch(e){ return 0; }
 }
 
 function lsLoad(){
   try{
     const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : null;
-  }catch(e){ return null; }
-}
-
-function lsMeta(){
-  try{
-    const raw = localStorage.getItem(LS_META);
-    return raw ? JSON.parse(raw) : null;
+    const meta = JSON.parse(localStorage.getItem(LS_META)||'{}');
+    return raw ? {articles: JSON.parse(raw), ts: meta.ts||0, withStock: meta.withStock||0} : null;
   }catch(e){ return null; }
 }
 
 async function saveArticles(){
-  // Fire-and-forget: update UI immediately, save to storage in background
-  lsSave(state.articles); // sofort lokal cachen
-  storageSet('articles', state.articles)
+  const ts = lsSave(state.articles); // sofort lokal speichern, niemals verlieren
+  // Supabase async im Hintergrund – mit Timestamp
+  const stripped = stripCacheFromArticles(state.articles);
+  storageSet('articles', {data: stripped, ts})
     .then(ok=>{ if(!ok) state.persistent=false; })
     .catch(()=>{ state.persistent=false; });
   state.pendingBackupReminder = true;
