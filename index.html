@@ -1951,8 +1951,7 @@ document.addEventListener('change', (e)=>{
           let a = findByExactId(id);
           // Auto-create if article doesn't exist yet
           if(!a){
-            const qty = Number(cols[qtyIdx]);
-            if(isNaN(qty) || qty <= 0) continue; // Nur anlegen wenn Bestand > 0
+            // Neuen Artikel anlegen – auch mit Lagerstand 0
             a = {
               id,
               art: artTypeIdx>-1 ? cols[artTypeIdx] : 'Toner',
