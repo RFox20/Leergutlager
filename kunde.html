@@ -125,7 +125,9 @@ async function loadArticles(){
     if(!res.ok) throw new Error('HTTP '+res.status);
     const rows = await res.json();
     if(!rows.length) throw new Error('Keine Daten');
-    const articles = rows[0].value;
+    const raw = rows[0].value;
+    // Neues Format: {data: [...], ts: 123} oder altes Format: direkt Array
+    const articles = Array.isArray(raw) ? raw : (raw.data || []);
     // Only show articles with available qty > 0
     allArticles = articles.filter(a => verfuegbar(a) > 0);
     allArticles.sort((a,b)=>a.id.localeCompare(b.id));
