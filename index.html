@@ -311,52 +311,52 @@ async function storageSet(key, value){
 async function loadAll(){
   let persistent = true;
 
-  // SCHRITT 1: localStorage sofort laden (kein Netzwerk, kein Warten)
+  // SCHRITT 1: localStorage sofort laden
   const lsCached = lsLoad();
-  if(lsCached && lsCached.articles && lsCached.articles.length > 0){
-    state.articles = lsCached.articles;
-  } else {
-    state.articles = SEED_ARTICLES.map(a=>({...a}));
-  }
-  const lsTs = lsCached ? (lsCached.ts||0) : 0;
+  const lsArticles = (lsCached && lsCached.articles && lsCached.articles.length > 0) ? lsCached.articles : null;
+  const lsWithStock = lsArticles ? lsArticles.filter(a=>a.qty>0).length : 0;
 
-  // SCHRITT 2: Supabase im Hintergrund laden und vergleichen
+  // SCHRITT 2: Supabase laden
+  let sbArticles = null, sbWithStock = 0;
   try{
     const sbRaw = await storageGet('articles');
-    let sbArticles = null, sbTs = 0;
-
     if(sbRaw){
-      // Neues Format: {data: [...], ts: 123456}
-      // Altes Format: direkt Array
-      if(Array.isArray(sbRaw)){
-        sbArticles = sbRaw; sbTs = 0;
-      } else if(sbRaw.data && Array.isArray(sbRaw.data)){
-        sbArticles = sbRaw.data; sbTs = sbRaw.ts||0;
-      }
+      if(Array.isArray(sbRaw)) sbArticles = sbRaw;
+      else if(sbRaw.data && Array.isArray(sbRaw.data)) sbArticles = sbRaw.data;
     }
-
-    if(!sbArticles){
-      // Supabase leer → localStorage hochladen (erster Start oder Supabase zurückgesetzt)
-      if(lsCached && lsCached.articles && lsCached.articles.length > 0){
-        storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: lsTs}).catch(()=>{});
-      } else {
-        // Echter Erststart
-        storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: Date.now()}).catch(()=>{});
-      }
-    } else if(sbTs >= lsTs){
-      // Supabase ist gleich alt oder neuer → Supabase laden
-      state.articles = sbArticles;
-      lsSave(state.articles); // lokalen Cache aktualisieren
-    } else {
-      // localStorage ist neuer → Supabase updaten
-      storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: lsTs}).catch(()=>{});
-      state.supabaseError = `Supabase war veraltet – lokale Daten wurden hochgeladen.`;
-      setTimeout(()=>{ state.supabaseError=''; render(); }, 5000);
-    }
+    sbWithStock = sbArticles ? sbArticles.filter(a=>a.qty>0).length : 0;
   }catch(e){
-    // Supabase nicht erreichbar → localStorage bleibt (bereits geladen oben)
     persistent = false;
-    state.supabaseError = `Supabase nicht erreichbar – lokale Daten aktiv${lsCached ? ` (${lsCached.withStock||0} Artikel mit Bestand)` : ''}. Seite neu laden wenn Verbindung steht.`;
+    state.supabaseError = `Supabase nicht erreichbar – lokale Daten aktiv (${lsWithStock} Artikel mit Bestand).`;
+  }
+
+  // SCHRITT 3: Beste Datenquelle wählen – MEHR ARTIKEL GEWINNT IMMER
+  if(sbArticles && sbWithStock >= lsWithStock){
+    // Supabase hat gleich viele oder mehr → Supabase verwenden
+    state.articles = sbArticles;
+    lsSave(state.articles); // localStorage aktualisieren
+  } else if(lsArticles && lsWithStock > sbWithStock){
+    // localStorage hat mehr → localStorage verwenden + Supabase updaten
+    state.articles = lsArticles;
+    state.supabaseError = sbArticles
+      ? `Lokale Daten (${lsWithStock}) sind vollständiger als Supabase (${sbWithStock}) – wird synchronisiert…`
+      : '';
+    // Supabase mit besseren Daten überschreiben
+    const ts = Date.now();
+    storageSet('articles', {data: stripCacheFromArticles(lsArticles), ts}).then(ok=>{
+      if(ok){ state.supabaseError=''; render(); }
+    }).catch(()=>{});
+  } else if(lsArticles){
+    state.articles = lsArticles;
+  } else if(sbArticles){
+    state.articles = sbArticles;
+    lsSave(state.articles);
+  } else {
+    // Echter Erststart
+    state.articles = SEED_ARTICLES.map(a=>({...a}));
+    const ts = Date.now();
+    lsSave(state.articles);
+    storageSet('articles', {data: stripCacheFromArticles(state.articles), ts}).catch(()=>{});
   }
 
   // aliases
@@ -388,7 +388,6 @@ async function loadAll(){
   state.persistent = persistent;
   reindexArticles();
 
-  // daily backup reminder
   try{
     const lastReminder = await storageGet('lastBackupReminder');
     const today = new Date().toISOString().slice(0,10);
@@ -396,7 +395,6 @@ async function loadAll(){
   }catch(e){ state.showDailyBackupBanner = true; }
 
   state.loaded = true;
-  // Auto-Backup einmal täglich
   setTimeout(()=>checkAutoBackup(), 3000);
 }
 function reindexArticles(){
