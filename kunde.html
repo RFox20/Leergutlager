@@ -117,6 +117,21 @@ let cart = {}; // {id: {article, qty}}
 
 function norm(s){ return (s||'').toLowerCase().replace(/[^a-z0-9]/g,''); }
 
+function naturalSortKey(id){
+  const n = norm(id);
+  const m = n.match(/^(.*?)(\d+)(.*)$/);
+  if(!m) return {prefix:n, len:0, num:0, suffix:''};
+  return {prefix:m[1], len:m[2].length, num:Number(m[2]), suffix:m[3]};
+}
+
+function compareArticles(a,b){
+  const ka = naturalSortKey(a.id), kb = naturalSortKey(b.id);
+  if(ka.prefix!==kb.prefix) return ka.prefix.localeCompare(kb.prefix);
+  if(ka.len!==kb.len) return ka.len-kb.len;
+  if(ka.num!==kb.num) return ka.num-kb.num;
+  return ka.suffix.localeCompare(kb.suffix);
+}
+
 async function loadArticles(){
   try{
     const res = await fetch(`${SB_URL}/rest/v1/kv_store?key=eq.articles&select=value`,{
@@ -130,7 +145,7 @@ async function loadArticles(){
     const articles = Array.isArray(raw) ? raw : (raw.data || []);
     // Only show articles with available qty > 0
     allArticles = articles.filter(a => verfuegbar(a) > 0);
-    allArticles.sort((a,b)=>a.id.localeCompare(b.id));
+    allArticles.sort(compareArticles);
     buildMarkeFilter();
     filterArticles();
   }catch(e){
