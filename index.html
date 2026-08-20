@@ -308,91 +308,101 @@ async function storageSet(key, value){
   }
 }
 
-async function loadAll(){
-  let persistent = true;
+const LS_ART = 'lg_articles';
+const LS_TS  = 'lg_articles_ts';
 
-async function loadAll(){
-  let persistent = true;
-
-  // localStorage sofort laden
-  const lsCached = lsLoad();
-  const lsArticles = (lsCached && lsCached.articles && lsCached.articles.length > 0) ? lsCached.articles : null;
-  const lsTs = (lsCached && lsCached.ts) || 0;
-
-  // Supabase laden
-  let sbArticles = null, sbTs = 0;
+function lsSave(articles){
   try{
-    const sbRaw = await storageGet('articles');
-    if(sbRaw){
-      if(Array.isArray(sbRaw)){ sbArticles = sbRaw; sbTs = 0; }
-      else if(sbRaw.data && Array.isArray(sbRaw.data)){ sbArticles = sbRaw.data; sbTs = sbRaw.ts||0; }
+    const stripped = stripCacheFromArticles(articles);
+    const ts = Date.now();
+    localStorage.setItem(LS_ART, JSON.stringify(stripped));
+    localStorage.setItem(LS_TS, String(ts));
+    return ts;
+  }catch(e){ return 0; }
+}
+
+function lsLoad(){
+  try{
+    const raw = localStorage.getItem(LS_ART);
+    const ts  = Number(localStorage.getItem(LS_TS)||0);
+    return raw ? {articles: JSON.parse(raw), ts} : null;
+  }catch(e){ return null; }
+}
+
+async function loadAll(){
+  // Sofort aus localStorage laden – kein Netzwerk, kein Warten
+  const cached = lsLoad();
+  const lsTs   = cached ? cached.ts : 0;
+  state.articles    = (cached && cached.articles.length > 0) ? cached.articles : SEED_ARTICLES.map(a=>({...a}));
+  state.aliases     = {...ALIAS_SEED};
+  state.transactions= [];
+  state.locations   = Array.from(new Set(state.articles.map(a=>a.ort).filter(Boolean))).sort();
+  state.showDailyBackupBanner = true;
+  reindexArticles();
+  state.persistent  = true;
+  state.loaded      = true;
+  render(); // sofort anzeigen – keine Netzwerkabhängigkeit
+
+  // Supabase-Sync im Hintergrund
+  _syncSupabase(lsTs);
+  setTimeout(()=>_autoBackup(), 3000);
+}
+
+async function _syncSupabase(lsTs){
+  // Artikel
+  try{
+    const raw = await storageGet('articles');
+    let sbArt = null, sbTs = 0;
+    if(Array.isArray(raw))              { sbArt = raw; sbTs = 0; }
+    else if(raw && raw.data)            { sbArt = raw.data; sbTs = raw.ts||0; }
+    if(!sbArt){
+      // Supabase leer → localStorage hochladen
+      const ts = lsTs || Date.now();
+      storageSet('articles', {data: stripCacheFromArticles(state.articles), ts}).catch(()=>{});
+    } else if(sbTs > lsTs){
+      // Supabase neuer → übernehmen
+      state.articles = sbArt;
+      lsSave(state.articles);
+      reindexArticles();
+      render();
+      showToast('🔄 Aktualisiert von Supabase');
+    } else if(lsTs > sbTs){
+      // localStorage neuer → Supabase updaten
+      storageSet('articles', {data: stripCacheFromArticles(state.articles), ts: lsTs}).catch(()=>{});
+    } else if(lsTs === 0 && sbTs === 0 && sbArt){
+      // Alte Version ohne Timestamp – Supabase übernehmen
+      state.articles = sbArt;
+      lsSave(state.articles);
+      reindexArticles();
+      render();
     }
   }catch(e){
-    persistent = false;
-    state.supabaseError = `Supabase nicht erreichbar – lokale Daten aktiv.`;
+    state.persistent = false;
+    state.supabaseError = 'Supabase nicht erreichbar – lokale Daten aktiv.';
+    render();
   }
-
-  // Timestamp entscheidet – höherer Timestamp = neuere Daten
-  if(sbArticles && sbTs >= lsTs){
-    // Supabase ist gleich alt oder neuer → Supabase verwenden
-    state.articles = sbArticles;
-    lsSave(state.articles); // lokalen Cache aktualisieren
-  } else if(lsArticles && lsTs > sbTs){
-    // localStorage ist neuer → verwenden + Supabase synchronisieren
-    state.articles = lsArticles;
-    const ts = lsTs;
-    storageSet('articles', {data: stripCacheFromArticles(lsArticles), ts})
-      .catch(()=>{});
-  } else if(sbArticles){
-    state.articles = sbArticles;
-    lsSave(state.articles);
-  } else if(lsArticles){
-    state.articles = lsArticles;
-  } else {
-    // Echter Erststart
-    state.articles = SEED_ARTICLES.map(a=>({...a}));
-    const ts = Date.now();
-    lsSave(state.articles);
-    storageSet('articles', {data: stripCacheFromArticles(state.articles), ts}).catch(()=>{});
-  }
-
-  // aliases
+  // Aliases
   try{
     const a = await storageGet('aliases');
     state.aliases = a || {...ALIAS_SEED};
     if(!a) storageSet('aliases', state.aliases).catch(()=>{});
-  }catch(e){ state.aliases = {...ALIAS_SEED}; }
-
-  // transactions
+  }catch(e){}
+  // Transactions
   try{
     const t = await storageGet('transactions');
-    state.transactions = t || [];
-  }catch(e){ state.transactions = []; }
-
-  // locations
+    if(t){ state.transactions = t; }
+  }catch(e){}
+  // Locations
   try{
     const l = await storageGet('locations');
-    if(l){
-      state.locations = l;
-    } else {
-      state.locations = Array.from(new Set(state.articles.map(a=>a.ort).filter(Boolean))).sort();
-      storageSet('locations', state.locations).catch(()=>{});
-    }
-  }catch(e){
-    state.locations = Array.from(new Set(state.articles.map(a=>a.ort).filter(Boolean))).sort();
-  }
-
-  state.persistent = persistent;
-  reindexArticles();
-
+    if(l){ state.locations = l; } else storageSet('locations', state.locations).catch(()=>{});
+  }catch(e){}
+  // Backup-Banner
   try{
-    const lastReminder = await storageGet('lastBackupReminder');
+    const lr = await storageGet('lastBackupReminder');
     const today = new Date().toISOString().slice(0,10);
-    if(!lastReminder || lastReminder !== today) state.showDailyBackupBanner = true;
-  }catch(e){ state.showDailyBackupBanner = true; }
-
-  state.loaded = true;
-  setTimeout(()=>checkAutoBackup(), 3000);
+    if(lr && lr === today) { state.showDailyBackupBanner = false; render(); }
+  }catch(e){}
 }
 function reindexArticles(){
   state.articles.forEach(a=>{
@@ -406,59 +416,26 @@ function reindexArticles(){
   });
 }
 
-const LS_KEY = 'leergut_articles_cache';
-const LS_META = 'leergut_cache_meta';
-
-function lsSave(articles){
-  try{
-    const stripped = stripCacheFromArticles(articles);
-    const ts = Date.now();
-    localStorage.setItem(LS_KEY, JSON.stringify(stripped));
-    localStorage.setItem(LS_META, JSON.stringify({ts, count: stripped.length, withStock: stripped.filter(a=>a.qty>0).length}));
-    return ts;
-  }catch(e){ return 0; }
-}
-
-function lsLoad(){
-  try{
-    const raw = localStorage.getItem(LS_KEY);
-    const meta = JSON.parse(localStorage.getItem(LS_META)||'{}');
-    return raw ? {articles: JSON.parse(raw), ts: meta.ts||0, withStock: meta.withStock||0} : null;
-  }catch(e){ return null; }
-}
-
 async function saveArticles(){
-  const ts = lsSave(state.articles); // sofort lokal speichern – immer erfolgreich
+  const ts = lsSave(state.articles); // sofort lokal – immer erfolgreich
   state.pendingBackupReminder = true;
-  checkAutoBackup();
-  // Supabase speichern und Ergebnis anzeigen
+  _autoBackup();
   const stripped = stripCacheFromArticles(state.articles);
   try{
     const ok = await storageSet('articles', {data: stripped, ts});
-    if(ok){
-      showSaveConfirm(true);
-    } else {
-      showSaveConfirm(false);
-      state.persistent = false;
-    }
-  }catch(e){
-    showSaveConfirm(false);
-    state.persistent = false;
-  }
+    showSaveConfirm(ok);
+    if(!ok) state.persistent = false;
+  }catch(e){ showSaveConfirm(false); state.persistent = false; }
 }
 
-function showSaveConfirm(success){
-  // Bestehende Bestätigung entfernen
+function showSaveConfirm(ok){
   document.querySelectorAll('.save-confirm').forEach(el=>el.remove());
   const el = document.createElement('div');
   el.className = 'save-confirm';
-  el.style.cssText = `position:fixed;bottom:70px;right:16px;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.2);transition:opacity .4s;${success ? 'background:#16A34A;color:#fff;' : 'background:#DC2626;color:#fff;'}`;
-  el.textContent = success ? '✅ Gespeichert' : '❌ Speichern fehlgeschlagen – bitte erneut buchen!';
+  el.style.cssText = 'position:fixed;bottom:70px;right:16px;padding:8px 14px;border-radius:10px;font-size:13px;font-weight:700;z-index:999;box-shadow:0 2px 8px rgba(0,0,0,.2);' + (ok ? 'background:#16A34A;color:#fff;' : 'background:#DC2626;color:#fff;');
+  el.textContent = ok ? '✅ Gespeichert' : '❌ Speichern fehlgeschlagen!';
   document.body.appendChild(el);
-  if(success){
-    setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),400); }, 2000);
-  }
-  // Bei Fehler: bleibt sichtbar bis nächste erfolgreiche Speicherung
+  if(ok) setTimeout(()=>el.remove(), 2000);
 }
 async function dismissDailyBackupBanner(){
   state.showDailyBackupBanner = false;
@@ -467,24 +444,44 @@ async function dismissDailyBackupBanner(){
 }
 async function saveAliases(){ storageSet('aliases', state.aliases).catch(()=>{}); }
 async function saveLocations(){ storageSet('locations', state.locations).catch(()=>{}); }
-
-function checkAutoBackup(){
-  try{
-    const today = new Date().toISOString().slice(0,10);
-    const lastAuto = localStorage.getItem('leergut_auto_backup_date');
-    if(lastAuto === today) return; // heute schon gemacht
-    const withStock = state.articles.filter(a=>a.qty>0);
-    if(withStock.length === 0) return;
-    // Automatisches CSV-Backup herunterladen
-    const all = state.articles;
-    downloadCsv(`AutoBackup_${today}.csv`, toCsv(all));
-    localStorage.setItem('leergut_auto_backup_date', today);
-  }catch(e){}
-}
 async function logTransaction(entry){
   state.transactions.push({ ts: nowIso(), ...entry });
   if(state.transactions.length > 400) state.transactions = state.transactions.slice(-400);
   storageSet('transactions', state.transactions).catch(()=>{});
+}
+
+function _autoBackup(){
+  try{
+    const today = new Date().toISOString().slice(0,10);
+    const last  = localStorage.getItem('lg_auto_backup');
+    if(last === today) return;
+    if(state.articles.filter(a=>a.qty>0).length === 0) return;
+    // CSV-Backup
+    downloadCsv('AutoBackup_'+today+'.csv', toCsv(state.articles));
+    // Tagesbericht für gestern
+    if(last && last !== today) _dailyReport(last);
+    localStorage.setItem('lg_auto_backup', today);
+  }catch(e){}
+}
+
+function _dailyReport(forDate){
+  try{
+    const dayTs = state.transactions.filter(t=>t.ts && t.ts.slice(0,10)===forDate);
+    if(!dayTs.length) return;
+    const rows = ['Art;Zeit;Artikel;Menge;Detail'];
+    dayTs.forEach(t=>{
+      const zeit = t.ts.slice(11,16);
+      const typ = t.type==='eingang'?'Zugang':t.type==='verkauf'||t.type==='sammelausgang'?'Abgang':t.type==='neuanlage'?'Neuanlage':t.type==='umlagern'||t.type==='palette'?'Umlagerung':'Sonstiges';
+      const menge = t.delta!=null ? (t.delta>0?'+':'')+t.delta+' Stk.' : '';
+      const detail = t.ort||t.oldId||'';
+      rows.push([typ,zeit,t.id||'',menge,detail].join(';'));
+    });
+    const blob = new Blob(['\uFEFF'+rows.join('\n')],{type:'text/csv;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href=url; a.download='Tagesbericht_'+forDate+'.csv';
+    a.click(); URL.revokeObjectURL(url);
+  }catch(e){}
 }
 
 /* ---------- search / alias resolution ---------- */
@@ -1948,7 +1945,8 @@ document.addEventListener('change', (e)=>{
           let a = findByExactId(id);
           // Auto-create if article doesn't exist yet
           if(!a){
-            // Neuen Artikel anlegen – auch mit Lagerstand 0
+            const qty = Number(cols[qtyIdx]);
+            if(isNaN(qty) || qty <= 0) continue; // Nur anlegen wenn Bestand > 0
             a = {
               id,
               art: artTypeIdx>-1 ? cols[artTypeIdx] : 'Toner',
