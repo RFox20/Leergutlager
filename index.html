@@ -551,8 +551,10 @@ function render(){
         <div style="display:flex;align-items:center;gap:6px;">
           <input type="file" id="csvImportInput" accept=".csv" style="display:none;">
           <input type="file" id="csvAusgangInput" accept=".csv" style="display:none;">
+          <input type="file" id="csvPickInput" accept=".csv" style="display:none;">
           <button data-action="trigger-import-csv" style="background:var(--accent);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📂 Import</button>
           <button data-action="trigger-ausgang-csv" style="background:#e07b00;color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📤 Ausgang</button>
+          <button data-action="trigger-pick-csv" style="background:#7C3AED;color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📋 Pickliste</button>
           <button data-action="quick-export" style="background:var(--green);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">💾 Export</button>
           <button class="gear" data-action="open-settings" aria-label="Einstellungen">⚙</button>
         </div>
@@ -1373,6 +1375,11 @@ document.addEventListener('click', async (e)=>{
     if(inp) inp.click();
     return;
   }
+  if(action==='trigger-pick-csv'){
+    const inp = document.getElementById('csvPickInput');
+    if(inp) inp.click();
+    return;
+  }
   if(action==='open-settings'){ state.modal='settings'; render(); return; }
   if(action==='open-numpad'){
     const kind = t.dataset.kind, key = t.dataset.key, boxIdx = t.dataset.boxIdx!=null && t.dataset.boxIdx!=='' ? Number(t.dataset.boxIdx) : null;
@@ -2098,6 +2105,66 @@ document.addEventListener('change', (e)=>{
       }catch(err){
         showToast('Fehler beim Ausgang: '+err.message);
       }
+    };
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
+  }
+
+  // ---- Pickliste ----
+  if(e.target.id === 'csvPickInput'){
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try{
+        const text = ev.target.result;
+        const lines = text.split('\n');
+        const sep = lines[0].includes(';') ? ';' : ',';
+        const headers = lines[0].replace(/^\uFEFF/,'').split(sep).map(h=>h.trim().replace(/^"|"$/g,''));
+        const artIdx   = headers.findIndex(h=>/artikel|code|art\.?nr|item/i.test(h));
+        const mengeIdx = headers.findIndex(h=>/menge|qty|quantity|stk|anzahl/i.test(h));
+        const preisIdx = headers.findIndex(h=>/preis|price|angebot|offer/i.test(h));
+        const noteIdx  = headers.findIndex(h=>/anmerk|note|kommentar|comment/i.test(h));
+        if(artIdx===-1){ showToast('Spalte "Artikel" nicht gefunden'); return; }
+        const requests = [];
+        for(let i=1;i<lines.length;i++){
+          const cols = lines[i].split(sep).map(c=>c.trim().replace(/^"|"$/g,''));
+          const id = cols[artIdx];
+          if(!id) continue;
+          requests.push({ id, menge:mengeIdx>-1?cols[mengeIdx]:'', preis:preisIdx>-1?cols[preisIdx]:'', note:noteIdx>-1?cols[noteIdx]:'' });
+        }
+        if(!requests.length){ showToast('Keine Artikel gefunden'); return; }
+        const pickItems = [], notFound = [];
+        requests.forEach(req => {
+          const a = findByExactId(req.id);
+          if(!a){ notFound.push(req.id); return; }
+          if(a.pallets && a.pallets.length > 0){
+            a.pallets.forEach(pal => {
+              const boxStr = (pal.boxes && pal.boxes.length > 1)
+                ? pal.boxes.map((b,i)=>'K'+(i+1)+':'+b+'Stk').join(' / ')
+                : pal.qty+'Stk';
+              pickItems.push({ ort:a.ort||'(kein Ort)', pal:'Palette '+pal.nr, boxes:boxStr, palQty:pal.qty, a, req });
+            });
+            const palSum = a.pallets.reduce((s,p)=>s+p.qty,0);
+            if(a.qty > palSum)
+              pickItems.push({ ort:a.ort||'(kein Ort)', pal:'lose', boxes:(a.qty-palSum)+'Stk', palQty:a.qty-palSum, a, req });
+          } else {
+            pickItems.push({ ort:a.ort||'(kein Ort)', pal:'', boxes:'', palQty:a.qty, a, req });
+          }
+        });
+        pickItems.sort((x,y)=>{ const c=(x.ort||'').localeCompare(y.ort||''); return c||((x.pal||'').localeCompare(y.pal||'')); });
+        const hdr = ['Lagerort','Palette','Kartons','Artikel','Marke','Bezeichnung','OEM','Lagerbestand','Pal.Bestand','Angebotsmenge','Angebotspreis','Anmerkung'];
+        const csvOut = [hdr.join(';')];
+        pickItems.forEach(item => {
+          const {a,req} = item;
+          csvOut.push([item.ort,item.pal,item.boxes,a.id,a.marke||'',a.bez1||a.bez2||'',a.oem||'',a.qty,item.palQty,req.menge,req.preis,req.note]
+            .map(v=>{ let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; }).join(';'));
+        });
+        if(notFound.length){ csvOut.push(''); csvOut.push('NICHT GEFUNDEN ('+notFound.length+'):'); notFound.forEach(id=>csvOut.push(id)); }
+        const date = new Date().toISOString().slice(0,10);
+        downloadCsv('Pickliste_'+date+'.csv', csvOut.join('\n'));
+        showToast(notFound.length ? '📋 '+pickItems.length+' Pos. | '+notFound.length+' nicht gefunden' : '📋 Pickliste: '+pickItems.length+' Positionen');
+      }catch(err){ showToast('Fehler: '+err.message); }
     };
     reader.readAsText(file, 'utf-8');
     e.target.value = '';
