@@ -198,6 +198,7 @@ let state = {
   renamingLocation: null,
   copyTemplate: null,
   umlagerung: null,
+  reservationFilter: '',
   verkaufQuery: '',
   verkaufSelected: null,
   verkaufMode: null, // 'voll' | 'teil'
@@ -244,7 +245,11 @@ function bestPrice(a){
   if(bestKey==null) return null;
   return { key:bestKey, label:PRICE_LABELS[bestKey], value:bestVal };
 }
-function verfuegbar(a){ return Math.max(0, (a.qty||0) - (a.reserved||0)); }
+function totalReserved(a){
+  if(a.reservations && a.reservations.length) return a.reservations.reduce((s,r)=>s+(r.qty||0),0);
+  return a.reserved||0; // Rückwärtskompatibilität
+}
+function verfuegbar(a){ return Math.max(0, (a.qty||0) - totalReserved(a)); }
 function toggleNewPalInput(){
   const sel = document.getElementById('umlagerZiel');
   const f = document.getElementById('newPalField');
@@ -555,6 +560,7 @@ function render(){
           <button data-action="trigger-import-csv" style="background:var(--accent);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📂 Import</button>
           <button data-action="trigger-ausgang-csv" style="background:#e07b00;color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📤 Ausgang</button>
           <button data-action="trigger-pick-csv" style="background:#7C3AED;color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">📋 Pickliste</button>
+          <button data-action="open-reservations" style="background:#0891B2;color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">🔒 Reserviert</button>
           <button data-action="quick-export" style="background:var(--green);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">💾 Export</button>
           <button class="gear" data-action="open-settings" aria-label="Einstellungen">⚙</button>
         </div>
@@ -991,6 +997,55 @@ function renderSuche(){
 
 /* --- modal (settings) --- */
 function renderModal(){
+  if(state.modal==='reservations'){
+    // Alle reservierten Artikel sammeln
+    const filterKunde = state.reservationFilter||'';
+    const allRes = [];
+    state.articles.forEach(a=>{
+      const resList = a.reservations && a.reservations.length
+        ? a.reservations
+        : (a.reserved>0 ? [{customer:'(unbekannt)', qty:a.reserved}] : []);
+      resList.forEach(r=>{
+        if(!filterKunde || r.customer===filterKunde)
+          allRes.push({a, r});
+      });
+    });
+    // Alle Kunden für Filter
+    const kunden = [...new Set(state.articles.flatMap(a=>(a.reservations||[]).map(r=>r.customer)).filter(Boolean))].sort();
+    // Sortierung nach Kunde → Lagerort
+    allRes.sort((x,y)=>((x.r.customer||'').localeCompare(y.r.customer||''))||((x.a.ort||'').localeCompare(y.a.ort||'')));
+    const total = allRes.reduce((s,x)=>s+x.r.qty,0);
+    return `
+      <div class="modal-backdrop" data-action="close-modal">
+        <div class="modal" data-stop="1" style="max-height:90vh;overflow-y:auto;">
+          <div class="modal-title">🔒 Reservierungen<button class="modal-close" data-action="close-modal">✕</button></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+            <select data-bind="reservationFilter" style="flex:1;padding:8px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;">
+              <option value="">Alle Kunden</option>
+              ${kunden.map(k=>`<option value="${escapeHtml(k)}" ${k===filterKunde?'selected':''}>${escapeHtml(k)}</option>`).join('')}
+            </select>
+            <span style="font-size:13px;color:var(--ink-soft);white-space:nowrap;">${allRes.length} Pos. | ${total} Stk.</span>
+            <button data-action="export-reservations" style="background:var(--green);color:#fff;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;">⬇ CSV</button>
+          </div>
+          ${allRes.length===0 ? '<div style="text-align:center;padding:30px;color:var(--ink-soft);">Keine Reservierungen</div>' :
+            allRes.map(({a,r})=>`
+            <div class="modal-item" style="flex-direction:column;align-items:flex-start;gap:4px;padding:10px 0;border-bottom:1px solid var(--line);">
+              <div style="display:flex;width:100%;justify-content:space-between;align-items:center;">
+                <div>
+                  <div style="font-weight:700;font-size:14px;">${escapeHtml(a.id)}</div>
+                  <div style="font-size:12px;color:var(--ink-soft);">${escapeHtml(a.marke||'')} · ${escapeHtml(a.ort||'kein Ort')}${a.bez1?' · '+escapeHtml(a.bez1):''}</div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-weight:700;color:#0891B2;">${r.qty} Stk. res.</div>
+                  <div style="font-size:12px;color:var(--ink-soft);">Bestand: ${a.qty} | verfügbar: ${verfuegbar(a)}</div>
+                </div>
+              </div>
+              <div style="background:#E0F2FE;color:#0369A1;border-radius:6px;padding:3px 8px;font-size:12px;font-weight:600;">👤 ${escapeHtml(r.customer||'(unbekannt)')}</div>
+            </div>`).join('')
+          }
+        </div>
+      </div>`;
+  }
   if(state.modal==='settings'){
     return `
       <div class="modal-backdrop" data-action="close-modal">
@@ -1126,10 +1181,15 @@ function renderModal(){
           <div class="field"><label>Lagerstand</label>
             <input type="text" inputmode="numeric" pattern="[0-9]*" id="editQty" value="${d.qty}">
           </div>
-          <div class="field"><label>🔒 Reserviert (nicht für Kunden verfügbar)</label>
-            <input type="text" inputmode="numeric" pattern="[0-9]*" id="editReserved" value="${d.reserved||0}" placeholder="0">
-            <div style="font-size:11px;color:var(--ink-soft);margin-top:3px;">Verfügbar für Kunden: ${verfuegbar(d)} Stk.</div>
-          </div>
+          <div class="section-title" style="margin-top:6px;">🔒 Reservierungen</div>
+          <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px;">Verfügbar für Kunden: <b>${verfuegbar(d)} Stk.</b> | Reserviert: <b>${totalReserved(d)} Stk.</b></div>
+          ${(d.reservations||[]).map((r,ri)=>`
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+              <input type="text" placeholder="Kundenname" id="resName_${ri}" value="${escapeHtml(r.customer||'')}" style="flex:2;padding:7px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;">
+              <input type="text" inputmode="numeric" pattern="[0-9]*" placeholder="Menge" id="resQty_${ri}" value="${r.qty||0}" style="flex:1;padding:7px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;">
+              <button data-action="remove-reservation" data-ri="${ri}" style="background:var(--danger);color:#fff;border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600;">✕</button>
+            </div>`).join('')}
+          <button data-action="add-reservation" style="width:100%;background:var(--surface-2);border:1.5px dashed var(--line);border-radius:8px;padding:8px;font-size:13px;color:var(--ink-soft);margin-bottom:4px;">+ Reservierung hinzufügen</button>
 
           <div class="section-title" style="margin-top:6px;">Paletten</div>
           ${(d.pallets||[]).map((p,pi)=>`
@@ -1312,7 +1372,17 @@ function _saveEditFieldsToDraft(){
   if(g('editBez2')!==null) d.bez2 = g('editBez2');
   if(g('editOrt')!==null) d.ort = g('editOrt');
   if(g('editQty')!==null) d.qty = Number(g('editQty')||0);
-  if(g('editReserved')!==null) d.reserved = Math.min(Number(g('editReserved')||0), d.qty);
+  // Reservierungen aus dem Modal lesen
+  const resItems = [];
+  let ri = 0;
+  while(document.getElementById('resName_'+ri) !== null){
+    const name = (document.getElementById('resName_'+ri).value||'').trim();
+    const qty  = Number(document.getElementById('resQty_'+ri).value||0);
+    if(name && qty > 0) resItems.push({customer:name, qty});
+    ri++;
+  }
+  d.reservations = resItems;
+  d.reserved = resItems.reduce((s,r)=>s+r.qty, 0); // Rückwärtskompatibilität
   // Pallets
   (d.pallets||[]).forEach((p,pi)=>{
     const nrEl = document.getElementById('editPalNr_'+pi);
@@ -1381,6 +1451,38 @@ document.addEventListener('click', async (e)=>{
     return;
   }
   if(action==='open-settings'){ state.modal='settings'; render(); return; }
+  if(action==='open-reservations'){ state.modal='reservations'; state.reservationFilter=''; render(); return; }
+  if(action==='add-reservation'){
+    if(!state.editDraft) return;
+    state.editDraft.reservations = state.editDraft.reservations || [];
+    state.editDraft.reservations.push({customer:'', qty:0});
+    render(); return;
+  }
+  if(action==='remove-reservation'){
+    if(!state.editDraft) return;
+    const ri = Number(t.dataset.ri);
+    state.editDraft.reservations = (state.editDraft.reservations||[]).filter((_,i)=>i!==ri);
+    render(); return;
+  }
+  if(action==='export-reservations'){
+    const allRes = [];
+    state.articles.forEach(a=>{
+      const resList = a.reservations && a.reservations.length
+        ? a.reservations
+        : (a.reserved>0 ? [{customer:'(unbekannt)', qty:a.reserved}] : []);
+      resList.forEach(r=>allRes.push({a,r}));
+    });
+    allRes.sort((x,y)=>((x.r.customer||'').localeCompare(y.r.customer||''))||((x.a.ort||'').localeCompare(y.a.ort||'')));
+    const hdr = ['Kunde','Artikel','Marke','Lagerort','Bezeichnung','Reserviert','Lagerbestand','Verfügbar'];
+    const rows = [hdr.join(';')];
+    allRes.forEach(({a,r})=>{
+      rows.push([r.customer||'',a.id,a.marke||'',a.ort||'',a.bez1||'',r.qty,a.qty,verfuegbar(a)].map(v=>{
+        let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s;
+      }).join(';'));
+    });
+    downloadCsv('Reservierungen_'+new Date().toISOString().slice(0,10)+'.csv', rows.join('\n'));
+    return;
+  }
   if(action==='open-numpad'){
     const kind = t.dataset.kind, key = t.dataset.key, boxIdx = t.dataset.boxIdx!=null && t.dataset.boxIdx!=='' ? Number(t.dataset.boxIdx) : null;
     state.numpad = { kind, key, boxIdx, value: getNumpadInitial(kind, key, boxIdx) };
@@ -1481,6 +1583,7 @@ document.addEventListener('click', async (e)=>{
     // Deep copy for editing
     state.editId = a.id;
     state.editDraft = JSON.parse(JSON.stringify(a));
+    if(!state.editDraft.reservations) state.editDraft.reservations = (state.editDraft.reserved>0) ? [{customer:'', qty:state.editDraft.reserved}] : [];
     state.modal = 'edit';
     render();
     return;
