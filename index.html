@@ -2135,25 +2135,31 @@ document.addEventListener('change', (e)=>{
         const sep = lines[0].includes(';') ? ';' : ',';
         const headers = lines[0].replace(/^\uFEFF/,'').split(sep).map(h=>h.trim().replace(/^"|"$/g,''));
         const artIdx = headers.findIndex(h=>h==='Artikel');
-        const qtyIdx = headers.findIndex(h=>h==='Lagerstand'||h==='Verkaufsmenge');
+        // Mengen-Spalte: Priorität Verkaufsmenge > Angebotsmenge > Pal.Bestand > Lagerstand
+        const qtyIdx = headers.findIndex(h=>['Verkaufsmenge','Angebotsmenge','Pal.Bestand','Lagerstand'].includes(h));
         const palIdx = headers.findIndex(h=>h==='Paletten');
-        if(artIdx===-1||qtyIdx===-1){ showToast('CSV-Format nicht erkannt (Spalten: Artikel + Lagerstand/Verkaufsmenge)'); return; }
-        let ausgebucht = 0;
-        let gesamtMenge = 0;
+        if(artIdx===-1||qtyIdx===-1){ showToast('CSV-Format nicht erkannt – bitte Spalte "Verkaufsmenge" hinzufügen'); return; }
+        // Pickliste hat mehrere Zeilen pro Artikel (eine pro Palette) → aggregieren
+        const mengenMap = {};
+        const palMap = {};
         for(let i=1;i<lines.length;i++){
           const cols = lines[i].split(sep).map(c=>c.trim().replace(/^"|"$/g,''));
-          const id = cols[artIdx];
-          if(!id) continue;
-          const verkaufsMenge = Number(cols[qtyIdx]);
+          const id = cols[artIdx]; if(!id) continue;
+          const qRaw = Number((cols[qtyIdx]||'').replace(/[^0-9.,]/g,'').replace(',','.'));
+          if(qRaw > 0){ mengenMap[id] = (mengenMap[id]||0) + qRaw; }
+          if(palIdx>-1 && cols[palIdx]) palMap[id] = (palMap[id]||'') + (palMap[id]?'|':'') + cols[palIdx];
+        }
+        let ausgebucht = 0, gesamtMenge = 0;
+        for(const [id, verkaufsMenge] of Object.entries(mengenMap)){
           if(!verkaufsMenge || verkaufsMenge <= 0) continue;
           const a = findByExactId(id);
           if(!a) continue;
           const vorher = a.qty;
           let restAbzug = Math.min(verkaufsMenge, a.qty);
 
-          // 1) Wenn Paletten-Spalte vorhanden: gezielte Palette(n) ausbuchen
-          if(palIdx > -1 && cols[palIdx]){
-            const palStr = cols[palIdx];
+          // 1) Wenn Paletten-Info vorhanden: gezielte Palette(n) ausbuchen
+          if(palMap[id]){
+            const palStr = palMap[id];
             palStr.split('|').forEach(part=>{
               const pm = part.trim().match(/Pal\.(.+?)x(\d+)Stk/);
               if(!pm) return;
@@ -2260,11 +2266,11 @@ document.addEventListener('change', (e)=>{
           }
         });
         pickItems.sort((x,y)=>{ const c=(x.ort||'').localeCompare(y.ort||''); return c||((x.pal||'').localeCompare(y.pal||'')); });
-        const hdr = ['Lagerort','Palette','Kartons','Artikel','Marke','Bezeichnung','OEM','Lagerbestand','Pal.Bestand','Angebotsmenge','Angebotspreis','Anmerkung'];
+        const hdr = ['Lagerort','Palette','Kartons','Artikel','Marke','Bezeichnung','OEM','Lagerbestand','Pal.Bestand','Verkaufsmenge','Angebotsmenge','Angebotspreis','Anmerkung'];
         const csvOut = [hdr.join(';')];
         pickItems.forEach(item => {
           const {a,req} = item;
-          csvOut.push([item.ort,item.pal,item.boxes,a.id,a.marke||'',a.bez1||a.bez2||'',a.oem||'',a.qty,item.palQty,req.menge,req.preis,req.note]
+          csvOut.push([item.ort,item.pal,item.boxes,a.id,a.marke||'',a.bez1||a.bez2||'',a.oem||'',a.qty,item.palQty,'',req.menge,req.preis,req.note]
             .map(v=>{ let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; }).join(';'));
         });
         if(notFound.length){ csvOut.push(''); csvOut.push('NICHT GEFUNDEN ('+notFound.length+'):'); notFound.forEach(id=>csvOut.push(id)); }
