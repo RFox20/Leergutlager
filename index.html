@@ -608,7 +608,9 @@ function renderScreen(){
 
 function renderArticleRow(a, {action='select', label='Auswählen'}={}){
   const res = a.reserved||0;
-  const resTag = res > 0 ? `<span style="background:#fff3cd;color:#856404;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;margin-left:6px;">🔒 ${res} res.</span>` : '';
+  const resTag = a.autoReserve
+    ? `<span style="background:#FEE2E2;color:#991B1B;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;margin-left:6px;">🔒 AUTO: ${escapeHtml(a.autoReserve)}</span>`
+    : res > 0 ? `<span style="background:#fff3cd;color:#856404;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600;margin-left:6px;">🔒 ${res} res.</span>` : '';
   return `
     <div class="article-row ${artClass(a.art)} ${a.qty>0?'':'is-empty'}">
       <div class="tag-stripe"></div>
@@ -1098,6 +1100,7 @@ function renderModal(){
             </select>
             <span style="font-size:13px;color:var(--ink-soft);white-space:nowrap;">${allRes.length} Pos. | ${total} Stk.</span>
             <button data-action="export-reservations" style="background:var(--green);color:#fff;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;">⬇ CSV</button>
+            ${filterKunde ? `<button data-action="clear-reservations-kunde" data-kunde="${escapeHtml(filterKunde)}" style="background:var(--danger);color:#fff;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;">🗑 Alle Res. für ${escapeHtml(filterKunde)} löschen</button>` : ''}
           </div>
           ${allRes.length===0 ? '<div style="text-align:center;padding:30px;color:var(--ink-soft);">Keine Reservierungen</div>' :
             allRes.map(({a,r})=>`
@@ -1255,6 +1258,18 @@ function renderModal(){
           </div>
           <div class="section-title" style="margin-top:6px;">🔒 Reservierungen</div>
           <div style="font-size:12px;color:var(--ink-soft);margin-bottom:8px;">Verfügbar für Kunden: <b>${verfuegbar(d)} Stk.</b> | Reserviert: <b>${totalReserved(d)} Stk.</b></div>
+          <div style="background:#FEF2F2;border:1.5px solid #FECACA;border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer;">
+              <input type="checkbox" id="autoReserveCheck" ${d.autoReserve?'checked':''} onchange="document.getElementById('autoReserveField').style.display=this.checked?'block':'none';">
+              Automatisch für Kunden reservieren (alle Zugänge)
+            </label>
+            <div id="autoReserveField" style="margin-top:8px;display:${d.autoReserve?'block':'none'};">
+              <input type="text" id="autoReserveCustomer" placeholder="Kundenname" value="${escapeHtml(d.autoReserve||'')}"
+                style="width:100%;padding:8px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;">
+              <div style="font-size:11px;color:#991B1B;margin-top:4px;">Alle Zugänge werden automatisch für diesen Kunden reserviert</div>
+            </div>
+          </div>
+
           ${(d.reservations||[]).map((r,ri)=>`
             <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
               <input type="text" placeholder="Kundenname" id="resName_${ri}" value="${escapeHtml(r.customer||'')}" style="flex:2;padding:7px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:13px;">
@@ -1446,6 +1461,16 @@ function _saveEditFieldsToDraft(){
   if(g('editBez2')!==null) d.bez2 = g('editBez2');
   if(g('editOrt')!==null) d.ort = g('editOrt');
   if(g('editQty')!==null) d.qty = Number(g('editQty')||0);
+  // Auto-Reserve
+  const autoCheck = document.getElementById('autoReserveCheck');
+  const autoCustomer = (document.getElementById('autoReserveCustomer')?.value||'').trim();
+  if(autoCheck && autoCheck.checked && autoCustomer){
+    d.autoReserve = autoCustomer;
+    d.reservations = [{customer: autoCustomer, qty: d.qty}];
+    d.reserved = d.qty;
+  } else {
+    d.autoReserve = null;
+  }
   // Reservierungen aus dem Modal lesen
   const resItems = [];
   let ri = 0;
@@ -1612,6 +1637,29 @@ document.addEventListener('click', async (e)=>{
     showToast('📦 '+rows.length+' Paletten-Positionen exportiert');
     return;
   }
+  if(action==='clear-reservations-kunde'){
+    const kunde = t.dataset.kunde;
+    if(!kunde) return;
+    if(!confirm(`Alle Reservierungen für „${kunde}" wirklich löschen?`)) return;
+    let count = 0;
+    state.articles.forEach(a=>{
+      // Remove from reservations array
+      if(a.reservations && a.reservations.length){
+        const before = a.reservations.length;
+        a.reservations = a.reservations.filter(r=>r.customer !== kunde);
+        count += before - a.reservations.length;
+      }
+      // Clear autoReserve if set for this customer
+      if(a.autoReserve === kunde){ a.autoReserve = null; }
+      // Recalculate reserved total
+      a.reserved = (a.reservations||[]).reduce((s,r)=>s+(r.qty||0),0);
+    });
+    saveArticles();
+    state.reservationFilter = '';
+    render();
+    showToast(`✓ ${count} Reservierungen für ${kunde} gelöscht`);
+    return;
+  }
   if(action==='export-reservations'){
     const allRes = [];
     state.articles.forEach(a=>{
@@ -1715,9 +1763,15 @@ document.addEventListener('click', async (e)=>{
       const delta = Number(state.eingangQty||0);
       a.qty = Number(a.qty||0) + delta;
       a.ort = state.eingangOrt || a.ort;
+      // Auto-Reserve: update reservation to match new total qty
+      if(a.autoReserve){
+        a.reservations = [{customer: a.autoReserve, qty: a.qty}];
+        a.reserved = a.qty;
+      }
       saveArticles();
       logTransaction({type:'eingang', id:a.id, delta:delta, ort:a.ort});
-      showToast('Gebucht: +'+delta+' '+a.id);
+      const autoMsg = a.autoReserve ? ` → Auto-Res. für ${a.autoReserve}: ${a.qty} Stk.` : '';
+      showToast('Gebucht: +'+delta+' '+a.id+autoMsg);
       state.eingangSelected=null; state.eingangQuery=''; state.eingangQty=1;
       render();
     }
@@ -2221,7 +2275,10 @@ document.addEventListener('change', (e)=>{
             created++;
           }
           const qty = Number(cols[qtyIdx]);
-          if(!isNaN(qty)) a.qty = qty;
+          if(!isNaN(qty)){
+            a.qty = qty;
+            if(a.autoReserve){ a.reservations=[{customer:a.autoReserve,qty:a.qty}]; a.reserved=a.qty; }
+          }
           if(ortIdx>-1 && cols[ortIdx]){ a.ort = cols[ortIdx]; newOrte.add(cols[ortIdx]); }
           if(bez1Idx>-1 && cols[bez1Idx]!==undefined) a.bez1 = cols[bez1Idx];
           if(palIdx>-1){
