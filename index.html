@@ -1348,7 +1348,9 @@ function showBackupToast(){
 function toCsv(rows){
   const headers = ['Art','Ort','OEM','Marke','Artikel','Bezeichnung 1','Bezeichnung 2','Lagerstand','Paletten'];
   const lines = [headers.join(';')];
-  rows.forEach(a=>{
+  // Sort so newly added articles appear in correct position
+  const sorted = [...rows].sort(compareArticles);
+  sorted.forEach(a=>{
     const palStr = (a.pallets && a.pallets.length)
       ? a.pallets.map(p=>'Pal.'+p.nr+'x'+p.qty+'Stk').join(' | ')
       : '';
@@ -1358,7 +1360,7 @@ function toCsv(rows){
       return s;
     });
     lines.push(vals.join(';'));
-  });
+  });  // end sorted.forEach
   return lines.join('\n');
 }
 function downloadCsv(filename, csvText){
@@ -1587,22 +1589,22 @@ document.addEventListener('click', async (e)=>{
         });
       });
     });
-    // Sortierung: Lagerort → Palette → Artikel
+    // Sortierung: Palette (numerisch) → Artikel
+    function palSort(nr){
+      const m = String(nr||'').match(/(\d+)/);
+      return m ? Number(m[1]) : 9999;
+    }
     rows.sort((a,b)=>{
-      const o = (a.ort||'').localeCompare(b.ort||'');
-      if(o) return o;
-      const p = String(a.palNr||'').localeCompare(String(b.palNr||''));
+      const p = palSort(a.palNr) - palSort(b.palNr);
       if(p) return p;
+      const ps = String(a.palNr||'').localeCompare(String(b.palNr||''));
+      if(ps) return ps;
       return (a.id||'').localeCompare(b.id||'');
     });
-    const hdr = ['Lagerort','Palette Nr.','Artikel','Marke','Bezeichnung','OEM','Stk. auf Palette','Karton-Aufschlüsselung'];
+    const hdr = ['Palette Nr.','Lagerort','Artikel','Marke','Bezeichnung','OEM','Stk. auf Palette','Karton-Aufschlüsselung'];
     const csvLines = [hdr.join(';')];
-    let lastOrt = null, lastPal = null;
     rows.forEach(r=>{
-      // Leerzeile bei neuem Lagerort für bessere Lesbarkeit
-      if(lastOrt !== null && r.ort !== lastOrt) csvLines.push('');
-      lastOrt = r.ort; lastPal = r.palNr;
-      csvLines.push([r.ort,'Pal. '+r.palNr,r.id,r.marke,r.bez1,r.oem,r.palQty,r.boxes]
+      csvLines.push(['Pal. '+r.palNr,r.ort,r.id,r.marke,r.bez1,r.oem,r.palQty,r.boxes]
         .map(v=>{ let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; }).join(';'));
     });
     const date = new Date().toISOString().slice(0,10);
