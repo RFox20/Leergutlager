@@ -224,9 +224,14 @@ function artClass(art){ const a=(art||'').toLowerCase(); if(a==='toner')return '
 function palletsSum(a){ return (a.pallets||[]).reduce((s,p)=>s+Number(p.qty||0),0); }
 function unassignedQty(a){ return Math.max(0, Number(a.qty||0) - palletsSum(a)); }
 function reconcileQty(a){
-  // Ensure qty >= palletsSum: pallets are source of truth for physical stock
   const ps = palletsSum(a);
-  if(ps > Number(a.qty||0)) a.qty = ps;
+  if(ps > Number(a.qty||0)){ a.qty = ps; return true; }
+  return false;
+}
+function _reconcileAll(){
+  let fixed = 0;
+  state.articles.forEach(a=>{ if(reconcileQty(a)) fixed++; });
+  return fixed;
 }
 function naturalSortKey(normId){
   // Letters-prefix first, then grouped by digit-length of the trailing number, then by numeric value.
@@ -375,9 +380,15 @@ async function _syncSupabase(lsTs){
     } else if(sbTs > lsTs){
       // Supabase neuer → übernehmen
       state.articles = sbArt;
+      const fixed = _reconcileAll();
       lsSave(state.articles);
       reindexArticles();
       render();
+      if(fixed > 0){
+        const ts = Date.now();
+        storageSet('articles', {data: stripCacheFromArticles(state.articles), ts}).catch(()=>{});
+        lsSave(state.articles);
+      }
       showToast('🔄 Aktualisiert von Supabase');
     } else if(lsTs > sbTs){
       // localStorage neuer → Supabase updaten
@@ -385,9 +396,14 @@ async function _syncSupabase(lsTs){
     } else if(lsTs === 0 && sbTs === 0 && sbArt){
       // Alte Version ohne Timestamp – Supabase übernehmen
       state.articles = sbArt;
+      const fixed = _reconcileAll();
       lsSave(state.articles);
       reindexArticles();
       render();
+      if(fixed > 0){
+        const ts = Date.now();
+        storageSet('articles', {data: stripCacheFromArticles(state.articles), ts}).catch(()=>{});
+      }
     }
   }catch(e){
     state.persistent = false;
