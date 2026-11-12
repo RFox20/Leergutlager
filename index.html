@@ -202,6 +202,7 @@ let state = {
   umlagerung: null,
   reservationFilter: '',
   tagesberichtDate: '',
+  txCache: {},
   verkaufQuery: '',
   verkaufSelected: null,
   verkaufMode: null, // 'voll' | 'teil'
@@ -306,6 +307,17 @@ async function storageGet(key){
   }
 }
 
+async function storageList(prefix){
+  const controller = new AbortController();
+  const timer = setTimeout(()=>controller.abort(), 8000);
+  try{
+    const res = await fetch(`${SB_URL}/rest/v1/kv_store?key=like.${encodeURIComponent(prefix)}*&select=value`, { headers: SB_HEADERS, signal: controller.signal });
+    clearTimeout(timer);
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const rows = await res.json();
+    return rows.flatMap(r=>Array.isArray(r.value)?r.value:[]);
+  }catch(e){ clearTimeout(timer); throw e; }
+}
 async function storageSet(key, value){
   try{
     const toSave = (key === 'articles' && Array.isArray(value))
@@ -473,43 +485,96 @@ async function dismissDailyBackupBanner(){
 }
 async function saveAliases(){ storageSet('aliases', state.aliases).catch(()=>{}); }
 async function saveLocations(){ storageSet('locations', state.locations).catch(()=>{}); }
-async function logTransaction(entry){
-  state.transactions.push({ ts: nowIso(), ...entry });
-  if(state.transactions.length > 400) state.transactions = state.transactions.slice(-400);
-  storageSet('transactions', state.transactions).catch(()=>{});
+function nowIso(){ return new Date().toISOString(); }
+function _p2(n){ return String(n).padStart(2,'0'); }
+function localDate(iso){ const d = iso ? new Date(iso) : new Date(); return d.getFullYear()+'-'+_p2(d.getMonth()+1)+'-'+_p2(d.getDate()); }
+function localTime(iso){ const d = new Date(iso); return _p2(d.getHours())+':'+_p2(d.getMinutes()); }
+
+/* Buchungsprotokoll: jede Buchungsgruppe wird unter eigenem Schlüssel gespeichert (tx_JJJJ-MM-TT_<id>) – mehrere Geräte überschreiben sich nicht */
+let txQueue = [], txTimer = null, txChain = Promise.resolve();
+function logTransaction(entry){
+  const e = { ts: nowIso(), ...entry };
+  state.transactions.push(e);
+  if(state.transactions.length > 1500) state.transactions = state.transactions.slice(-1500);
+  txQueue.push(e);
+  if(!txTimer) txTimer = setTimeout(flushTx, 200);
+}
+function flushTx(){
+  txTimer = null;
+  const batch = txQueue.splice(0);
+  if(!batch.length) return;
+  txChain = txChain.then(async ()=>{
+    const byDate = {};
+    batch.forEach(e=>{ const d = localDate(e.ts); (byDate[d] = byDate[d] || []).push(e); });
+    for(const date of Object.keys(byDate)){
+      try{
+        const uid = Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+        const ok = await storageSet('tx_'+date+'_'+uid, byDate[date]);      // eigener Eintrag je Gruppe: nichts wird überschrieben
+        if(!ok) throw new Error('save failed');
+        delete state.txCache[date];
+      }catch(err){
+        txQueue.push(...byDate[date]);                    // später erneut versuchen
+        if(!txTimer) txTimer = setTimeout(flushTx, 8000);
+      }
+    }
+  }).catch(()=>{});
+}
+async function getTxDay(date){
+  let remote = [];
+  try{ remote = await storageList('tx_'+date+'_'); }catch(e){}
+  const mine = state.transactions.filter(t=>t.ts && localDate(t.ts)===date);
+  const pend = txQueue.filter(t=>localDate(t.ts)===date);
+  const seen = new Set(), out = [];
+  [...remote, ...mine, ...pend].forEach(t=>{
+    const k = t.ts+'|'+t.type+'|'+(t.id||'')+'|'+(t.delta==null?'':t.delta)+'|'+(t.ort||'');
+    if(!seen.has(k)){ seen.add(k); out.push(t); }
+  });
+  out.sort((a,b)=>a.ts<b.ts?-1:a.ts>b.ts?1:0);
+  return out;
+}
+async function loadTxDay(date){
+  state.txCache[date] = undefined;
+  const list = await getTxDay(date);
+  state.txCache[date] = list;
+  if(state.modal==='tagesbericht' && (state.tagesberichtDate||localDate())===date) render();
 }
 
 function _autoBackup(){
   try{
-    const today = new Date().toISOString().slice(0,10);
+    const today = localDate();
     const last  = localStorage.getItem('lg_auto_backup');
     if(last === today) return;
     if(state.articles.filter(a=>a.qty>0).length === 0) return;
     // CSV-Backup
     downloadCsv('AutoBackup_'+today+'.csv', toCsv(state.articles));
-    // Tagesbericht für gestern
+    // Tagesbericht für den letzten Arbeitstag
     if(last && last !== today) _dailyReport(last);
     localStorage.setItem('lg_auto_backup', today);
   }catch(e){}
 }
 
-function _dailyReport(forDate){
+function txRows(list){
+  const LAB = {'eingang':'Zugang','palette':'Zugang auf Palette','verkauf':'Abgang','sammelausgang':'Sammelausgang','inventur':'Inventur','inventur-palette':'Inventur Palette','neuanlage':'Neuanlage','umlagern':'Umlagerung','bearbeitung':'Bearbeitung'};
+  const rows = [];
+  list.forEach(t=>{
+    const base = [localTime(t.ts), LAB[t.type]||t.type||''];
+    if(t.changes && t.changes.length){
+      t.changes.forEach(ch=>rows.push([...base, ch.id||'', (ch.before!=null&&ch.after!=null)?(ch.before+' -> '+ch.after):'', t.ort||'', '']));
+    } else {
+      rows.push([...base, t.id||'', t.delta!=null?((t.delta>0?'+':'')+t.delta+' Stk.'):'', t.ort||'', (t.oldId?('vorher: '+t.oldId):(t.customer&&t.customer!=='Sammelausgang'?t.customer:''))]);
+    }
+  });
+  return rows;
+}
+function txCsv(list){
+  const q = v=>{ let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; };
+  return ['Zeit;Typ;Artikel;Menge;Lagerort;Kunde/Detail', ...txRows(list).map(r=>r.map(q).join(';'))].join('\n');
+}
+async function _dailyReport(forDate){
   try{
-    const dayTs = state.transactions.filter(t=>t.ts && t.ts.slice(0,10)===forDate);
-    if(!dayTs.length) return;
-    const rows = ['Art;Zeit;Artikel;Menge;Detail'];
-    dayTs.forEach(t=>{
-      const zeit = t.ts.slice(11,16);
-      const typ = t.type==='eingang'?'Zugang':t.type==='verkauf'||t.type==='sammelausgang'?'Abgang':t.type==='neuanlage'?'Neuanlage':t.type==='umlagern'||t.type==='palette'?'Umlagerung':'Sonstiges';
-      const menge = t.delta!=null ? (t.delta>0?'+':'')+t.delta+' Stk.' : '';
-      const detail = t.ort||t.oldId||'';
-      rows.push([typ,zeit,t.id||'',menge,detail].join(';'));
-    });
-    const blob = new Blob(['\uFEFF'+rows.join('\n')],{type:'text/csv;charset=utf-8'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href=url; a.download='Tagesbericht_'+forDate+'.csv';
-    a.click(); URL.revokeObjectURL(url);
+    const list = await getTxDay(forDate);
+    if(!list.length) return;
+    downloadCsv('Tagesbericht_'+forDate+'.csv', txCsv(list));
   }catch(e){}
 }
 
@@ -1029,63 +1094,51 @@ function renderSuche(){
 /* --- modal (settings) --- */
 function renderModal(){
   if(state.modal==='tagesbericht'){
-    const selDate = state.tagesberichtDate || new Date().toISOString().slice(0,10);
-    const dayTs = state.transactions.filter(t => t.ts && t.ts.slice(0,10) === selDate);
-    const TYPE_LABEL = {
-      'eingang':'↓ Zugang','verkauf':'↑ Abgang','sammelausgang':'↑ Sammelausgang',
-      'inventur':'☷ Inventur','neuanlage':'✚ Neuanlage','umlagern':'⇄ Umlagerung',
-      'palette':'⇄ Umlagerung'
-    };
-    const TYPE_COLOR = {
-      'eingang':'color:#16A34A','verkauf':'color:#DC2626','sammelausgang':'color:#DC2626',
-      'neuanlage':'color:#7C3AED','umlagern':'color:#D97706','palette':'color:#D97706',
-      'inventur':'color:var(--ink-soft)'
-    };
-    const grouped = {};
-    dayTs.forEach(t => {
-      const key = t.type||'sonstiges';
-      if(!grouped[key]) grouped[key] = [];
-      grouped[key].push(t);
-    });
-    const totalIn  = dayTs.filter(t=>t.type==='eingang').reduce((s,t)=>s+(t.delta||0),0);
-    const totalOut = dayTs.filter(t=>t.type==='verkauf'||t.type==='sammelausgang').reduce((s,t)=>s+Math.abs(t.delta||0),0);
+    const selDate = state.tagesberichtDate || localDate();
+    const list = state.txCache[selDate];
+    const TYPE_LABEL = {'eingang':'↓ Zugang','palette':'↓ Zugang auf Palette','neuanlage':'✚ Neuanlage','verkauf':'↑ Abgang','sammelausgang':'↑ Sammelausgang','umlagern':'⇄ Umlagerung','inventur':'☷ Inventur','inventur-palette':'☷ Inventur Palette','bearbeitung':'✎ Bearbeitung'};
+    const TYPE_COLOR = {'eingang':'#16A34A','palette':'#16A34A','neuanlage':'#7C3AED','verkauf':'#DC2626','sammelausgang':'#DC2626','umlagern':'#D97706','inventur':'#475569','inventur-palette':'#475569','bearbeitung':'#475569'};
+    const ORDER = Object.keys(TYPE_LABEL);
+    let body;
+    if(list === undefined){
+      body = '<div style="text-align:center;padding:30px;color:var(--ink-soft);">⏳ Buchungen werden geladen …</div>';
+    } else if(!list.length){
+      body = `<div style="text-align:center;padding:30px;color:var(--ink-soft);">Keine Buchungen am ${selDate}</div>`;
+    } else {
+      const totalIn  = list.filter(t=>t.type==='eingang'||t.type==='palette'||t.type==='neuanlage').reduce((s,t)=>s+Math.max(0,t.delta||0),0);
+      const totalOut = list.filter(t=>t.type==='verkauf'||t.type==='sammelausgang').reduce((s,t)=>s+Math.abs(t.delta||0),0);
+      const grouped = {};
+      list.forEach(t=>{ (grouped[t.type||'sonstiges'] = grouped[t.type||'sonstiges'] || []).push(t); });
+      const types = Object.keys(grouped).sort((a,b)=>(ORDER.indexOf(a)<0?99:ORDER.indexOf(a))-(ORDER.indexOf(b)<0?99:ORDER.indexOf(b)));
+      const line = t=>{
+        let title = t.id || '', sub = localTime(t.ts)+' Uhr', right = '';
+        if(t.changes && t.changes.length){
+          return t.changes.map(ch=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);"><div><div style="font-weight:700;font-size:13px;">${escapeHtml(ch.id||'')}</div><div style="font-size:11px;color:var(--ink-soft);">${localTime(t.ts)} Uhr${t.ort?' · '+escapeHtml(t.ort):''}</div></div><div style="font-weight:700;font-size:14px;color:#475569;">${ch.before!=null?ch.before:''} → ${ch.after!=null?ch.after:''}</div></div>`).join('');
+        }
+        if(t.oldId) title = escapeHtml(t.oldId)+' → '+escapeHtml(t.id||''); else title = escapeHtml(title);
+        if(t.ort) sub += ' · '+escapeHtml(t.ort);
+        if(t.customer && t.customer!=='Sammelausgang') sub += ' · '+escapeHtml(t.customer);
+        if(t.delta!=null) right = (t.delta>0?'+':'')+t.delta+' Stk.';
+        return `<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);"><div><div style="font-weight:700;font-size:13px;">${title}</div><div style="font-size:11px;color:var(--ink-soft);">${sub}</div></div><div style="font-weight:700;font-size:14px;color:${TYPE_COLOR[t.type]||'#475569'};">${right}</div></div>`;
+      };
+      body = `<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+          <div style="background:#DCFCE7;border-radius:8px;padding:8px 12px;font-size:13px;"><b style="color:#16A34A">↓ +${totalIn} Stk. Zugänge</b></div>
+          <div style="background:#FEE2E2;border-radius:8px;padding:8px 12px;font-size:13px;"><b style="color:#DC2626">↑ −${totalOut} Stk. Abgänge</b></div>
+          <div style="background:var(--surface-2);border-radius:8px;padding:8px 12px;font-size:13px;"><b>${list.length} Buchungen</b></div></div>`
+        + types.map(ty=>`<div style="font-size:12px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin:12px 0 4px;">${TYPE_LABEL[ty]||escapeHtml(ty)} (${grouped[ty].length})</div>${grouped[ty].map(line).join('')}`).join('');
+    }
     return `
       <div class="modal-backdrop" data-action="close-modal">
         <div class="modal" data-stop="1" style="max-height:92vh;overflow-y:auto;">
           <div class="modal-title">📅 Tagesbericht<button class="modal-close" data-action="close-modal">✕</button></div>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
             <input type="date" id="tagesberichtDateInput" value="${selDate}"
-              onchange="state.tagesberichtDate=this.value;render();"
+              onchange="state.tagesberichtDate=this.value;loadTxDay(this.value);render();"
               style="flex:1;padding:8px 10px;border:1.5px solid var(--line);border-radius:8px;font-size:14px;">
             <button data-action="tagesbericht-today" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;">Heute</button>
+            <button data-action="tagesbericht-reload" style="background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;cursor:pointer;" title="Neu laden">⟳</button>
           </div>
-          ${dayTs.length === 0
-            ? `<div style="text-align:center;padding:30px;color:var(--ink-soft);">Keine Buchungen am ${selDate}</div>`
-            : `<div style="display:flex;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
-                <div style="background:#DCFCE7;border-radius:8px;padding:8px 14px;font-size:13px;">
-                  <b style="color:#16A34A">↓ +${totalIn} Stk. Zugänge</b>
-                </div>
-                <div style="background:#FEE2E2;border-radius:8px;padding:8px 14px;font-size:13px;">
-                  <b style="color:#DC2626">↑ −${totalOut} Stk. Abgänge</b>
-                </div>
-                <div style="background:var(--surface-2);border-radius:8px;padding:8px 14px;font-size:13px;">
-                  <b>${dayTs.length} Buchungen gesamt</b>
-                </div>
-              </div>
-              ${Object.entries(grouped).map(([type, entries])=>`
-                <div style="font-size:12px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.05em;margin:10px 0 6px;">${TYPE_LABEL[type]||type} (${entries.length})</div>
-                ${entries.map(t=>`
-                  <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line);gap:8px;">
-                    <div>
-                      <div style="font-weight:700;font-size:13px;">${escapeHtml(t.id||'')}</div>
-                      <div style="font-size:11px;color:var(--ink-soft);">${t.ts ? t.ts.slice(11,16)+' Uhr' : ''}${t.ort ? ' · '+escapeHtml(t.ort) : ''}${t.customer&&t.customer!=='Sammelausgang' ? ' · '+escapeHtml(t.customer) : ''}</div>
-                    </div>
-                    <div style="font-weight:700;font-size:14px;${TYPE_COLOR[type]||''}">
-                      ${t.delta != null ? (t.delta > 0 ? '+' : '') + t.delta + ' Stk.' : ''}
-                    </div>
-                  </div>`).join('')}
-              `).join('')}
-            `}
+          ${body}
           <button data-action="export-tagesbericht" data-date="${selDate}"
             style="width:100%;margin-top:14px;background:var(--green);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:600;cursor:pointer;">
             ⬇ Als CSV exportieren
@@ -1161,6 +1214,8 @@ function renderModal(){
               <button class="row-btn" style="font-size:12px;padding:4px 8px;background:var(--danger);color:#fff;" data-action="delete-location" data-loc="${escapeHtml(l)}">✕</button>
             </div>`).join('')}
           <div style="margin-top:16px;"><button class="small-link" data-action="trigger-preise-csv">💶 Preisliste importieren (CSV)</button></div>
+          <div style="margin-top:10px;"><button class="small-link" data-action="export-preisvergleich" data-stock="0">📊 Preisvergleich exportieren (alle Artikel mit Preis)</button></div>
+          <div style="margin-top:10px;"><button class="small-link" data-action="export-preisvergleich" data-stock="1">📊 Preisvergleich (nur Artikel mit Bestand)</button></div>
           <div style="margin-top:16px;"><button class="small-link" data-action="export-log">Buchungsverlauf als CSV exportieren</button></div>
           <div style="margin-top:14px;"><button class="small-link" data-action="reset-data" style="color:var(--danger);">Auf Originaldaten zurücksetzen</button></div>
         </div>
@@ -1581,32 +1636,50 @@ document.addEventListener('click', async (e)=>{
   if(action==='open-reservations'){ state.modal='reservations'; state.reservationFilter=''; render(); return; }
   if(action==='open-tagesbericht'){
     state.modal='tagesbericht';
-    state.tagesberichtDate = new Date().toISOString().slice(0,10);
-    render(); return;
+    state.tagesberichtDate = localDate();
+    render();
+    loadTxDay(state.tagesberichtDate);
+    return;
   }
   if(action==='tagesbericht-today'){
-    state.tagesberichtDate = new Date().toISOString().slice(0,10);
-    render(); return;
+    state.tagesberichtDate = localDate();
+    render();
+    loadTxDay(state.tagesberichtDate);
+    return;
+  }
+  if(action==='tagesbericht-reload'){
+    const d = state.tagesberichtDate || localDate();
+    render();
+    loadTxDay(d);
+    return;
   }
   if(action==='export-tagesbericht'){
-    const selDate = t.dataset.date || state.tagesberichtDate;
-    const dayTs = state.transactions.filter(t=>t.ts&&t.ts.slice(0,10)===selDate);
-    if(!dayTs.length){ showToast('Keine Buchungen an diesem Tag'); return; }
-    const TYPE_LABEL = {'eingang':'Zugang','verkauf':'Abgang','sammelausgang':'Sammelausgang',
-      'inventur':'Inventur','neuanlage':'Neuanlage','umlagern':'Umlagerung','palette':'Umlagerung'};
-    const hdr = ['Zeit','Typ','Artikel','Menge','Lagerort','Kunde/Detail'];
-    const rows = [hdr.join(';')];
-    dayTs.forEach(tx=>{
-      rows.push([
-        tx.ts?tx.ts.slice(11,16):'',
-        TYPE_LABEL[tx.type]||tx.type||'',
-        tx.id||'',
-        tx.delta!=null?((tx.delta>0?'+':'')+tx.delta+' Stk.'):'',
-        tx.ort||'',
-        tx.customer&&tx.customer!=='Sammelausgang'?tx.customer:''
-      ].map(v=>{ let s=String(v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; }).join(';'));
+    const selDate = t.dataset.date || state.tagesberichtDate || localDate();
+    const list = state.txCache[selDate] || await getTxDay(selDate);
+    if(!list.length){ showToast('Keine Buchungen an diesem Tag'); return; }
+    downloadCsv('Tagesbericht_'+selDate+'.csv', txCsv(list));
+    return;
+  }
+  if(action==='export-preisvergleich'){
+    const onlyStock = t.dataset.stock === '1';
+    const keys = Object.keys(PRICE_LABELS);
+    const num = v => (typeof v==='number' && !isNaN(v)) ? v : null;
+    const f = v => v==null ? '' : v.toFixed(2).replace('.',',');
+    const q = v=>{ let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; };
+    const list = state.articles.filter(a=>{
+      const has = keys.some(k=>num(a.prices && a.prices[k])!==null);
+      return onlyStock ? (a.qty>0) : (has || a.qty>0);
+    }).sort(compareArticles);
+    const lines = [['Artikel','Marke','Art','OEM','Lagerort','Lagerbestand','Verfügbar','Bezeichnung',...keys.map(k=>'Preis '+PRICE_LABELS[k]),'Bester Preis','Bester Abnehmer','Zweitbester Preis','Zweitbester Abnehmer','Differenz'].map(q).join(';')];
+    list.forEach(a=>{
+      const vals = keys.map(k=>num(a.prices && a.prices[k]));
+      const offers = keys.map((k,i)=>({k, v:vals[i]})).filter(o=>o.v!==null && o.v>0).sort((x,y)=>y.v-x.v);
+      const b = offers[0], s2 = offers[1];
+      lines.push([a.id, a.marke||'', a.art||'', a.oem||'', a.ort||'', a.qty||0, verfuegbar(a), [a.bez1,a.bez2].filter(Boolean).join(' / '),
+        ...vals.map(f), b?f(b.v):'', b?PRICE_LABELS[b.k]:'', s2?f(s2.v):'', s2?PRICE_LABELS[s2.k]:'', (b&&s2)?f(b.v-s2.v):''].map(q).join(';'));
     });
-    downloadCsv('Tagesbericht_'+selDate+'.csv', rows.join('\n'));
+    downloadCsv('Preisvergleich_'+localDate()+(onlyStock?'_nur_Bestand':'')+'.csv', lines.join('\n'));
+    showToast('📊 Preisvergleich: '+list.length+' Artikel');
     return;
   }
   if(action==='add-reservation'){
@@ -2049,6 +2122,7 @@ document.addEventListener('click', async (e)=>{
 
     reconcileQty(a);
     saveArticles();
+    logTransaction({type:'umlagern', id:a.id, delta:actualMenge, ort:'Pal. '+sourcePalNr+' → Pal. '+zielNr});
     state.modal=null; state.umlagerung=null;
     state.inventurPaletteDraft={};
     render();
