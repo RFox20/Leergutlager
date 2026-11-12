@@ -2546,7 +2546,12 @@ document.addEventListener('change', (e)=>{
         const iA = ix('Artikel');
         if(iA === -1){ showToast('Spalte "Artikel" nicht gefunden'); return; }
         const PCOLS = { 'Preis CS':'cs', 'Preis GFM':'gfm', 'Preis ECO':'eco', 'Preis Broker':'brokerin', 'Preis DKO':'dko', 'Preis ITP':'itp' };
-        const pIdx = Object.keys(PCOLS).map(k=>[ix(k), PCOLS[k]]).filter(x=>x[0] > -1);
+        const pIdx = [], replaceKeys = [];
+        H.forEach((hd, k)=>{
+          const isRep = /\s*\(ersetzen\)\s*$/i.test(hd);
+          const base = hd.replace(/\s*\(ersetzen\)\s*$/i, '').trim();
+          if(PCOLS[base]){ pIdx.push([k, PCOLS[base]]); if(isRep) replaceKeys.push(PCOLS[base]); }
+        });
         const iRen = ix('Umbenennen von'), iNeu = ix('Neu anlegen'), iArt = ix('Art'), iMarke = ix('Marke'), iOem = ix('OEM'), iBez = ix('Bezeichnung 1');
         const num = v => { v = String(v==null?'':v).trim().replace(/[^0-9,.\-]/g,''); if(!v) return null; const n = parseFloat(v.replace(',','.')); return isNaN(n) ? null : n; };
         const plan = [];
@@ -2570,8 +2575,22 @@ document.addEventListener('change', (e)=>{
           } else if(Object.keys(prices).length){ unknown++; }
         }
         if(!plan.length){ showToast('Nichts zu aktualisieren'); return; }
-        const msg = 'Preisliste einspielen?\n\n' + toUpdate + ' Artikel bekommen neue Preise\n' + toCreate + ' Artikel werden neu angelegt\n' + toRename + ' Artikel werden umbenannt (alter Name → neuer Name)\n' + bezFill + ' leere Bezeichnungen werden ergänzt\n' + unknown + ' Zeilen mit Preis, aber Artikel nicht im Tool (werden übersprungen)\n\nBestände werden nicht verändert.';
+        const replInfo = replaceKeys.map(key=>({ key,
+          have: state.articles.filter(a=>a.prices && a.prices[key]!=null).length,
+          neu:  plan.filter(p=>p.prices && p.prices[key]!==undefined).length }));
+        if(replInfo.some(r=>r.neu===0)){ showToast('Abbruch: Die Datei enthält keine neuen Preise zum Ersetzen – es wurde nichts gelöscht'); return; }
+        const replMsg = replInfo.map(r=>'⚠ ' + (PRICE_LABELS[r.key]||r.key) + ': ' + r.have + ' bisherige Preise werden GELÖSCHT und durch ' + r.neu + ' neue ersetzt (alte Preise werden vorher als CSV gesichert)\n\n').join('');
+        const msg = 'Preisliste einspielen?\n\n' + replMsg + toUpdate + ' Artikel bekommen neue Preise\n' + toCreate + ' Artikel werden neu angelegt\n' + toRename + ' Artikel werden umbenannt (alter Name → neuer Name)\n' + bezFill + ' leere Bezeichnungen werden ergänzt\n' + unknown + ' Zeilen mit Preis, aber Artikel nicht im Tool (werden übersprungen)\n\nBestände werden nicht verändert.';
         if(!confirm(msg)) return;
+        replaceKeys.forEach(key=>{
+          const label = (PRICE_LABELS[key]||key);
+          const old = state.articles.filter(a=>a.prices && a.prices[key]!=null);
+          if(old.length){
+            const q = v=>{ let s=String(v==null?'':v); if(s.includes(';')||s.includes('"')) s='"'+s.replace(/"/g,'""')+'"'; return s; };
+            downloadCsv('Preise_'+label.replace(/\s+/g,'_')+'_alt_'+localDate()+'.csv', ['Artikel;Preis '+label, ...old.map(a=>q(a.id)+';'+String(a.prices[key]).replace('.',','))].join('\n'));
+          }
+          state.articles.forEach(a=>{ if(a.prices) a.prices[key] = null; });
+        });
         let renamed = false;
         plan.forEach(p=>{
           let a = p.a;
@@ -2594,7 +2613,7 @@ document.addEventListener('change', (e)=>{
         reindexArticles();
         saveArticles();
         render();
-        showToast('💶 ' + toUpdate + ' Preise aktualisiert, ' + toCreate + ' neu angelegt');
+        showToast('💶 ' + toUpdate + ' Preise aktualisiert, ' + toCreate + ' neu angelegt' + (replaceKeys.length ? ' – ' + replaceKeys.map(k=>PRICE_LABELS[k]||k).join(', ') + ' ersetzt' : ''));
       }catch(err){ showToast('Fehler: ' + err.message); }
     };
     reader.readAsText(file, 'utf-8');
